@@ -13,9 +13,18 @@
 
 | 킷 | 버전 | 위치 | 용도 |
 |----|------|------|------|
-| LearningLog Python/Web UI | 0.6.0 | `src/learninglog/` | Python 패키지와 브라우저 UI |
-| LearningLog Windows Runner | 0.6.0 | `local_powershell/` | Windows PowerShell 로컬 운영판 |
+| LearningLog Python/Web UI | 0.7.0 | `src/learninglog/` | Python 패키지와 브라우저 UI |
+| LearningLog Windows Runner | 0.7.0 | `local_powershell/` | Windows PowerShell 로컬 운영판 |
 | DailyLog Kit | 1.2 | `dailylog_kit/` | 하루 회고 Markdown 생성기 |
+
+### v0.7.0 변경점 (2026-10)
+
+- 발행 로직을 새 모듈 `LearningLog.Publish`로 분리 — `run_learninglog_publish.ps1`은 단계(사전검사 → 저장소·대상 검사 → 복사 → 배포)를 순서대로 호출하는 짧은 스크립트가 됨
+- LM Studio 호출을 `LearningLog.Llm` 하나로 통합, Ollama 경로 제거. `blogdraft`·`repair_drafts`도 LM 일시 오류를 최대 3회 재시도
+- 스크립트마다 복사돼 있던 공용 함수를 `LearningLog.LocalCore`로 통합
+- 버그 수정: 제목에 따옴표·역슬래시가 있을 때 YAML front matter 이스케이프, 빈 registry 첫 실행, `cleanup`의 미정의 경로 변수, `Invoke-LLPublishGitCapture` 미export(UI 선택 발행 경로)
+- 테스트와 가짜 LM 서버 하니스(`app/tests`, `app/tests/harness`) 포함
+- 자세한 내용: `local_powershell/README.md`
 
 ### v0.6.0 변경점 (2026-10)
 

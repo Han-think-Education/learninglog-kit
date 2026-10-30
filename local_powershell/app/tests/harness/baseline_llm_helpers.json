@@ -1,0 +1,114 @@
+{
+  "extract/failFirst=0": {
+    "generate": {
+      "ok": true,
+      "value": "## 모의 응답\n\n- 입력 길이: 11\n- 본문 첫 줄: hello world"
+    },
+    "chunks": {
+      "count": 2,
+      "lengths": [
+        35,
+        38
+      ]
+    },
+    "chunkedShort": {
+      "ok": true,
+      "value": "## 모의 응답\n\n- 입력 길이: 14\n- 본문 첫 줄: 짧은 본문"
+    },
+    "chunkedLong": {
+      "ok": true,
+      "value": "## 모의 응답 - 입력 길이: 77 - 본문 첫 줄: 셋째 단락입니다. --- ## 모의 응답 - 입력 길이: 67 - 본문 첫 줄: 첫째 단락입니다. --- ## 모의 응답 - 입력 길이: 85 - 본문 첫 줄: 넷째 단락입니다. 마지막입니다. --- ## 모의 응답 - 입력 길이: 33 - 본문 첫 줄: 다섯째."
+    },
+    "requests": {
+      "total": 6,
+      "failed": 0,
+      "maxTokens": [
+        512
+      ]
+    }
+  },
+  "extract/failFirst=1": {
+    "generate": {
+      "ok": true,
+      "value": "## 모의 응답\n\n- 입력 길이: 11\n- 본문 첫 줄: hello world"
+    },
+    "chunks": {
+      "count": 2,
+      "lengths": [
+        35,
+        38
+      ]
+    },
+    "chunkedShort": {
+      "ok": true,
+      "value": "## 모의 응답\n\n- 입력 길이: 14\n- 본문 첫 줄: 짧은 본문"
+    },
+    "chunkedLong": {
+      "ok": true,
+      "value": "## 모의 응답 - 입력 길이: 77 - 본문 첫 줄: 셋째 단락입니다. --- ## 모의 응답 - 입력 길이: 67 - 본문 첫 줄: 첫째 단락입니다. --- ## 모의 응답 - 입력 길이: 85 - 본문 첫 줄: 넷째 단락입니다. 마지막입니다. --- ## 모의 응답 - 입력 길이: 33 - 본문 첫 줄: 다섯째."
+    },
+    "requests": {
+      "total": 7,
+      "failed": 1,
+      "maxTokens": [
+        512
+      ]
+    }
+  },
+  "blogdraft/failFirst=0": {
+    "generate": {
+      "ok": true,
+      "value": "## 모의 응답\n\n- 입력 길이: 11\n- 본문 첫 줄: hello world"
+    },
+    "chunks": {
+      "count": 2,
+      "lengths": [
+        35,
+        38
+      ]
+    },
+    "chunkedShort": {
+      "ok": true,
+      "value": "## 모의 응답\n\n- 입력 길이: 14\n- 본문 첫 줄: 짧은 본문"
+    },
+    "chunkedLong": {
+      "ok": true,
+      "value": "## 모의 응답 - 입력 길이: 66 - 본문 첫 줄: 셋째 단락입니다. --- ## 모의 응답 - 입력 길이: 56 - 본문 첫 줄: 첫째 단락입니다. --- ## 모의 응답 - 입력 길이: 74 - 본문 첫 줄: 넷째 단락입니다. 마지막입니다. --- ## 모의 응답 - 입력 길이: 22 - 본문 첫 줄: 다섯째."
+    },
+    "requests": {
+      "total": 6,
+      "failed": 0,
+      "maxTokens": [
+        1024
+      ]
+    }
+  },
+  "blogdraft/failFirst=1": {
+    "generate": {
+      "ok": true,
+      "value": "## 모의 응답\n\n- 입력 길이: 11\n- 본문 첫 줄: hello world"
+    },
+    "chunks": {
+      "count": 2,
+      "lengths": [
+        35,
+        38
+      ]
+    },
+    "chunkedShort": {
+      "ok": true,
+      "value": "## 모의 응답\n\n- 입력 길이: 14\n- 본문 첫 줄: 짧은 본문"
+    },
+    "chunkedLong": {
+      "ok": true,
+      "value": "## 모의 응답 - 입력 길이: 66 - 본문 첫 줄: 셋째 단락입니다. --- ## 모의 응답 - 입력 길이: 56 - 본문 첫 줄: 첫째 단락입니다. --- ## 모의 응답 - 입력 길이: 74 - 본문 첫 줄: 넷째 단락입니다. 마지막입니다. --- ## 모의 응답 - 입력 길이: 22 - 본문 첫 줄: 다섯째."
+    },
+    "requests": {
+      "total": 7,
+      "failed": 1,
+      "maxTokens": [
+        1024
+      ]
+    }
+  }
+}

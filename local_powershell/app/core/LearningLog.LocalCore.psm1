@@ -431,26 +431,6 @@ function Get-LLOverlapChars {
     return (Get-LLProcessingPolicy -SourceType $SourceType -SourceCategory $SourceCategory -FileType $FileType).OverlapChars
 }
 
-function Invoke-LLOllamaGenerate {
-    param(
-        [string]$BaseUrl = "http://127.0.0.1:11434",
-        [Parameter(Mandatory)][string]$Model,
-        [Parameter(Mandatory)][string]$Prompt,
-        [int]$NumPredict = 512,
-        [int]$NumCtx = 8192
-    )
-    $bodyObj = [ordered]@{
-        model = $Model
-        prompt = $Prompt
-        stream = $false
-        options = [ordered]@{ num_predict = $NumPredict; num_ctx = $NumCtx }
-    }
-    $bodyBytes = [System.Text.Encoding]::UTF8.GetBytes(($bodyObj | ConvertTo-Json -Depth 4 -Compress))
-    $resp = Invoke-RestMethod -Uri "$BaseUrl/api/generate" -Method Post `
-        -Body $bodyBytes -ContentType "application/json; charset=utf-8" -TimeoutSec 600 -ErrorAction Stop
-    return $resp.response
-}
-
 function Split-LLTextChunks {
     param(
         [Parameter(Mandatory)][string]$Text,
@@ -504,7 +484,8 @@ function Split-LLTextChunks {
 }
 
 function Remove-ExtraHugoFrontMatter {
-    param([Parameter(Mandatory)][AllowEmptyString()][string]$Text)
+    # -KeepTrailingWhitespace: 줄 끝 공백을 건드리지 않는다(LLM 초안 정리용. 마크다운 강제 줄바꿈 보존).
+    param([Parameter(Mandatory)][AllowEmptyString()][string]$Text, [switch]$KeepTrailingWhitespace)
     $lines = $Text -split "`r?`n"
     if ($lines.Count -eq 0) { return $Text }
     $start = 0
@@ -528,8 +509,66 @@ function Remove-ExtraHugoFrontMatter {
         $out.Add($line)
         $i++
     }
-    $final = ($out -join "`n") -replace '(?m)[ \t]+$', ''
+    $final = ($out -join "`n")
+    if (-not $KeepTrailingWhitespace) { $final = $final -replace '(?m)[ \t]+$', '' }
     return ($final.TrimEnd() + "`n")
+}
+
+# YAML 큰따옴표 문자열. 기본은 줄바꿈을 공백으로 접는다(-KeepNewlines 로 원문 유지).
+function ConvertTo-LLYamlString {
+    param([AllowEmptyString()][string]$Value, [switch]$KeepNewlines)
+    $s = if ($null -eq $Value) { "" } else { [string]$Value }
+    # 치환 문자열에서 백슬래시는 특수문자가 아니다: '\\' = 역슬래시 2개, '\"' = 역슬래시 + 따옴표.
+    # (옛 구현은 '\\\\' / '\\"' 로 이중 이스케이프해 따옴표·역슬래시가 든 제목이 잘못된 YAML 이 됐다.)
+    $s = $s -replace '\\', '\\'
+    $s = $s -replace '"', '\"'
+    if (-not $KeepNewlines) { $s = $s -replace "\r?\n", ' ' }
+    return '"' + $s + '"'
+}
+
+# HTML 태그 제거 + 엔티티 해제 + 공백 정리.
+function ConvertTo-LLPlainText {
+    param([AllowEmptyString()][string]$Value)
+    if ([string]::IsNullOrWhiteSpace($Value)) { return "" }
+    $s = [System.Net.WebUtility]::HtmlDecode($Value)
+    $s = [regex]::Replace($s, '<[^>]+>', ' ')
+    return [regex]::Replace($s, '\s+', ' ').Trim()
+}
+
+# 초안 파일이 속한 섹션(04_blog_drafts 아래 첫 폴더). 없으면 learning.
+function Get-LLDraftSection {
+    param([Parameter(Mandatory)][System.IO.FileInfo]$Draft, [Parameter(Mandatory)][string]$DraftsDir)
+    $rel = $Draft.FullName.Replace($DraftsDir + "\", "").Replace("\", "/")
+    $sectionName = ($rel -split "/")[0]
+    if (-not $sectionName) { return "learning" }
+    return $sectionName.ToLowerInvariant()
+}
+
+# 오늘 처리 대상인가: 백로그 포함 / 파일명이 오늘 날짜 / registry 등록일이 오늘 / 파일 수정일이 오늘.
+function Test-LLTodayDraft {
+    param(
+        [Parameter(Mandatory)]$Draft,
+        $Row,
+        [Parameter(Mandatory)][string]$TodayStr,
+        [switch]$IncludeBacklog
+    )
+    if ($IncludeBacklog) { return $true }
+    if ($Draft.Name -like "$TodayStr*") { return $true }
+    if ($Row) {
+        $d = Get-LLProp $Row "date_added"
+        if ($d -eq $TodayStr) { return $true }
+    }
+    if ($Draft.LastWriteTime.ToString("yyyy-MM-dd") -eq $TodayStr) { return $true }
+    return $false
+}
+
+# 초안 → registry 행. 본문의 source_id 가 우선, 없으면 파일명(topic)으로 찾는다.
+function Resolve-LLDraftRow {
+    param($Draft, $Content, [Parameter(Mandatory)]$RowBySid, [Parameter(Mandatory)]$RowByTopic)
+    $sid = Get-LLDraftSourceId $Content
+    if ($sid -and $RowBySid.ContainsKey($sid)) { return $RowBySid[$sid] }
+    if ($RowByTopic.ContainsKey($Draft.BaseName)) { return $RowByTopic[$Draft.BaseName] }
+    return $null
 }
 
 function Get-LLArticleStructureStats {
@@ -1110,46 +1149,32 @@ function Repair-LLIndentedCodeFences {
 }
 
 function Set-LLMRecoveryEndpoint {
-    # 공통 슬롯 생성기의 재시도 대상은 이번 실행에서 선택한 엔진과 같아야 한다.
+    # 공통 슬롯 생성기의 재시도 대상(LM Studio). -Engine 은 호환용으로만 받는다.
     param(
-        [ValidateSet("lm", "ollama")][string]$Engine = "lm",
-        [string]$LMStudioBase = "http://127.0.0.1:1234",
-        [string]$OllamaBase = "http://127.0.0.1:11434"
+        [ValidateSet("lm")][string]$Engine = "lm",
+        [string]$LMStudioBase = "http://127.0.0.1:1234"
     )
     $script:LLMRecoveryEngine = $Engine
     $script:LLMRecoveryLMStudioBase = $LMStudioBase.TrimEnd('/')
-    $script:LLMRecoveryOllamaBase = $OllamaBase.TrimEnd('/')
 }
 
 function Wait-LLMReady {
-    # 선택된 엔진의 API만 한 번 점검한다. 서버가 꺼져 있으면 회복을 오래 기다리지 않는다.
+    # LM Studio API 를 한 번 점검한다. 서버가 꺼져 있으면 회복을 오래 기다리지 않는다.
     param(
         [int]$MaxWaitSec = 90,
-        [ValidateSet("lm", "ollama")][string]$Engine = $script:LLMRecoveryEngine,
-        [string]$LMStudioBase = $script:LLMRecoveryLMStudioBase,
-        [string]$OllamaBase = $script:LLMRecoveryOllamaBase
+        [ValidateSet("lm")][string]$Engine = $script:LLMRecoveryEngine,
+        [string]$LMStudioBase = $script:LLMRecoveryLMStudioBase
     )
-    if ([string]::IsNullOrWhiteSpace($Engine)) { $Engine = "lm" }
     if ([string]::IsNullOrWhiteSpace($LMStudioBase)) { $LMStudioBase = "http://127.0.0.1:1234" }
-    if ([string]::IsNullOrWhiteSpace($OllamaBase)) { $OllamaBase = "http://127.0.0.1:11434" }
 
     try {
-        if ($Engine -eq "lm") {
-            $null = Invoke-RestMethod "$($LMStudioBase.TrimEnd('/'))/v1/models" -TimeoutSec 4 -ErrorAction Stop
-        } else {
-            $null = Invoke-RestMethod "$($OllamaBase.TrimEnd('/'))/api/tags" -TimeoutSec 4 -ErrorAction Stop
-        }
+        $null = Invoke-RestMethod "$($LMStudioBase.TrimEnd('/'))/v1/models" -TimeoutSec 4 -ErrorAction Stop
         Start-Sleep -Seconds 2   # 호출 간 간격
         return $true
     } catch {
-        if ($Engine -eq "lm") {
-            Write-Host "    (LM Studio 서버가 꺼져 있거나 응답하지 않습니다. 현재 작업을 중단합니다.)" -ForegroundColor Red
-        } else {
-            Write-Host "    (Ollama 서버가 꺼져 있거나 응답하지 않습니다. 현재 작업을 중단합니다.)" -ForegroundColor Red
-        }
+        Write-Host "    (LM Studio 서버가 꺼져 있거나 응답하지 않습니다. 현재 작업을 중단합니다.)" -ForegroundColor Red
         return $false
     }
-    return $false
 }
 
 function Test-LLMModelAvailable {

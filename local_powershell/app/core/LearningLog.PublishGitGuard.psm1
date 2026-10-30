@@ -377,3 +377,5 @@ function Assert-LLPublishRepositoryPathsAllowed {
 }
 
 Export-ModuleMember -Function Get-LLPublishGitState, Assert-LLPublishRepositoryReady, Assert-LLPublishStagedPathsAllowed, Assert-LLPublishRepositoryPathsAllowed, Get-LLPublishDestinationDisposition, Add-LLPublishDestinationPlanEntry, Add-LLPublishPathsToIndex, Format-LLPublishPaths
+# publish 스크립트(-SelectionFile 경로)가 직접 호출한다. 내보내지 않으면 "명령을 찾을 수 없음" 오류가 난다.
+Export-ModuleMember -Function Invoke-LLPublishGitCapture

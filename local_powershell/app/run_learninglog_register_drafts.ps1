@@ -45,14 +45,6 @@ $regPath   = Get-LLRegistryPath
 $fields    = @(Get-LLRegistryFields)
 $SectionFilter = $Section.Trim().ToLowerInvariant()
 
-function Get-DraftSection {
-    param([Parameter(Mandatory)][System.IO.FileInfo]$Draft)
-    $rel = $Draft.FullName.Replace($DraftsDir + "\", "").Replace("\", "/")
-    $sectionName = ($rel -split "/")[0]
-    if (-not $sectionName) { return "learning" }
-    return $sectionName.ToLowerInvariant()
-}
-
 Write-Host ""
 Write-Host "========================================" -ForegroundColor Cyan
 Write-Host "  LearningLog Register Drafts" -ForegroundColor Cyan
@@ -94,7 +86,7 @@ function New-Sid {
 
 $drafts = @(Get-ChildItem -LiteralPath $DraftsDir -Recurse -Filter "*.md" -File | Sort-Object FullName)
 if ($SectionFilter) {
-    $drafts = @($drafts | Where-Object { (Get-DraftSection $_) -eq $SectionFilter })
+    $drafts = @($drafts | Where-Object { (Get-LLDraftSection -Draft $_ -DraftsDir $DraftsDir) -eq $SectionFilter })
 }
 $toRegister = [System.Collections.Generic.List[object]]::new()
 

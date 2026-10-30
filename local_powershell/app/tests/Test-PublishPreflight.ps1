@@ -29,13 +29,12 @@ try {
     $hash = (Get-FileHash -LiteralPath $draftPath -Algorithm SHA256).Hash
 
     $publisherPath = Join-Path $root 'app/run_learninglog_publish.ps1'
-    $publisher = Get-Content -LiteralPath $publisherPath -Raw
+    $publisher = (Get-Content -LiteralPath $publisherPath -Raw) + "`n" + (Get-Content -LiteralPath (Join-Path $root 'app/core/LearningLog.Publish.psm1') -Raw)
     $tokens = $null; $parseErrors = $null
     $publisherAst = [System.Management.Automation.Language.Parser]::ParseFile($publisherPath, [ref]$tokens, [ref]$parseErrors)
     Check ($parseErrors.Count -eq 0) 'publisher parses after integration'
-    $processAst = $publisherAst.Find({ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Process-FrontMatter' }, $true)
-    . ([scriptblock]::Create($processAst.Extent.Text))
-    $processed = Process-FrontMatter -Content $raw
+    Import-Module (Join-Path $root 'app/core/LearningLog.Publish.psm1') -Force -DisableNameChecking
+    $processed = ConvertTo-LLPublishedPost -Content $raw
 
     $common = @{
         Path = $draftPath; ReadyRoot = $ready; ExpectedSha256 = $hash
@@ -47,7 +46,7 @@ try {
     Check ($result.source_sha256 -eq $hash) 'preflight receipt reports SHA-256 without changing the source'
     Check ($processed -notmatch '(?im)^\s*public_policy\s*:') 'publisher conversion strips internal public_policy metadata'
     Check ($processed -match 'Only synthetic content\.' -and $processed -notmatch '(?m)^public_policy: public$') 'internal metadata stripping preserves ordinary article text'
-    $bodyExample = Process-FrontMatter -Content ($raw + "`n`npublic_policy: code-example")
+    $bodyExample = ConvertTo-LLPublishedPost -Content ($raw + "`n`npublic_policy: code-example")
     Check ($bodyExample -match '(?m)^public_policy: code-example$') 'policy-like text in the article body is preserved'
 
     $partialRaw = $raw -replace 'public_policy: public', 'public_policy: partial-public'
@@ -119,8 +118,8 @@ try {
     $case = $common.Clone(); $case.Path = $outside
     Check (HasFinding (Invoke-LLPublishPreflight @case) 'outside_approved_root') 'file outside the approved folder is blocked'
 
-    $preflightComment = $publisher.IndexOf('발행 전 모든 선택 파일을 먼저 검사한다')
-    $copyLoop = $publisher.IndexOf('foreach ($targetPlan in $targetPlans) {', $preflightComment)
+    $preflightComment = $publisher.IndexOf('Invoke-LLPublishPreflightStage -Ctx')
+    $copyLoop = $publisher.IndexOf('Invoke-LLPublishCopyStage -Ctx', $preflightComment)
     Check ($publisher.Contains('Invoke-LLPublishPreflight') -and $preflightComment -ge 0 -and $copyLoop -gt $preflightComment) 'publisher preflights the complete selection before its copy loop'
     $suitePassed = $script:passed
 } finally {

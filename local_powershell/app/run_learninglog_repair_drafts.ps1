@@ -42,7 +42,7 @@ param(
     [string]$Mode = "auto",
     [int]$NumCtx = 16384,
     [string]$Model = "gemma3:12b",
-    [ValidateSet("lm","ollama")][string]$Engine = "lm",
+    [ValidateSet("lm")][string]$Engine = "lm",   # 호환용(LM Studio 단일 엔진)
     [string]$LMStudioBase  = "http://127.0.0.1:1234",
     [string]$LMStudioModel = ""
 )
@@ -50,6 +50,7 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 Import-Module (Join-Path $PSScriptRoot "core\LearningLog.LocalCore.psm1") -Force -DisableNameChecking
+Import-Module (Join-Path $PSScriptRoot "core\LearningLog.Llm.psm1") -Force -DisableNameChecking
 
 $Root = Get-LLRoot
 $DraftsDir = Get-LLPath "04_blog_drafts"
@@ -57,8 +58,7 @@ $BackupRoot = Get-LLPath ".repair_backup"
 $RunTime = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
 $TodayStr = Get-Date -Format "yyyy-MM-dd"
 $Stamp = Get-Date -Format "yyyyMMdd_HHmmss"
-$OllamaBase = "http://127.0.0.1:11434"
-$UseLM = ($Engine -eq 'lm')   # [엔진] 기본 lm(LM Studio). auto 모드는 LLM 자체를 안 씀.
+# LM Studio 단일 엔진. auto 모드는 LLM 자체를 안 씀.
 $SectionFilter = $Section.Trim().ToLowerInvariant()
 
 function Write-Info {
@@ -71,63 +71,15 @@ function Get-DraftRelPath {
     return (Get-LLRelativePath $Draft.FullName)
 }
 
-function Get-DraftSection {
-    param([Parameter(Mandatory)][System.IO.FileInfo]$Draft)
-    $relFromDrafts = $Draft.FullName.Replace($DraftsDir + "\", "").Replace("\", "/")
-    $s = ($relFromDrafts -split "/")[0]
-    if (-not $s) { return "learning" }
-    return $s.ToLowerInvariant()
-}
-
 function Get-DraftDate {
     param([string]$Content)
     if ($Content -match '(?m)^\s*date:\s*([0-9]{4}-[0-9]{2}-[0-9]{2})') { return $Matches[1] }
     return (Get-Date -Format "yyyy-MM-dd")
 }
 
-function Test-TodayDraft {
-    param(
-        [Parameter(Mandatory)][System.IO.FileInfo]$Draft,
-        $Row
-    )
-    if ($IncludeBacklog) { return $true }
-    if ($Draft.Name -like "$TodayStr*") { return $true }
-    if ($Row) {
-        $d = Get-LLProp $Row "date_added"
-        if ($d -eq $TodayStr) { return $true }
-    }
-    if ($Draft.LastWriteTime.ToString("yyyy-MM-dd") -eq $TodayStr) { return $true }
-    return $false
-}
-
-function Invoke-OllamaRepair {
+function Invoke-LLMRepair {
     param([string]$Prompt)
-    if ($UseLM) {
-        # LM Studio(OpenAI 호환) 재작성 경로
-        $bodyObj = [ordered]@{
-            model = $Model
-            messages = @([ordered]@{ role = "user"; content = $Prompt })
-            stream = $false; temperature = 0.25; max_tokens = 4096
-        }
-        $bytes = [System.Text.Encoding]::UTF8.GetBytes(($bodyObj | ConvertTo-Json -Depth 6 -Compress))
-        $resp = Invoke-RestMethod -Uri "$LMStudioBase/v1/chat/completions" -Method Post -Body $bytes -ContentType "application/json; charset=utf-8" -TimeoutSec 900 -ErrorAction Stop
-        $t = [string]$resp.choices[0].message.content
-        if ([string]::IsNullOrWhiteSpace($t)) { throw "LM Studio 빈 응답 (모델 thinking 모드가 켜져 있으면 끄세요)" }
-        return $t
-    }
-    $bodyObj = [ordered]@{
-        model = $Model
-        prompt = $Prompt
-        stream = $false
-        options = [ordered]@{
-            num_predict = 4096
-            num_ctx = $NumCtx
-            temperature = 0.25
-        }
-    }
-    $bodyBytes = [System.Text.Encoding]::UTF8.GetBytes(($bodyObj | ConvertTo-Json -Depth 5 -Compress))
-    $resp = Invoke-RestMethod -Uri "$OllamaBase/api/generate" -Method Post -Body $bodyBytes -ContentType "application/json; charset=utf-8" -TimeoutSec 900 -ErrorAction Stop
-    return [string]$resp.response
+    return Invoke-LLMGenerate -Base $LMStudioBase -Model $Model -Prompt $Prompt -NumPredict 4096 -Temperature 0.25 -EmptyMessage "LM Studio 빈 응답 (모델 thinking 모드가 켜져 있으면 끄세요)"
 }
 
 function Backup-Draft {
@@ -241,18 +193,18 @@ function Get-RepairTargets {
 
     $all = @(Get-ChildItem -LiteralPath $DraftsDir -Recurse -Filter "*.md" -File | Sort-Object FullName)
     if ($SectionFilter) {
-        $all = @($all | Where-Object { (Get-DraftSection $_) -eq $SectionFilter })
+        $all = @($all | Where-Object { (Get-LLDraftSection -Draft $_ -DraftsDir $DraftsDir) -eq $SectionFilter })
     }
     $targets = [System.Collections.Generic.List[object]]::new()
     $script:RepairExcludedBacklog = 0
     foreach ($d in $all) {
         $content = Read-LLText $d.FullName
         $row = Resolve-LLDraftRegistryRow -Draft $d -Content $content
-        if (-not (Test-TodayDraft -Draft $d -Row $row)) {
+        if (-not (Test-LLTodayDraft -Draft $d -Row $row -TodayStr $TodayStr -IncludeBacklog:$IncludeBacklog)) {
             $script:RepairExcludedBacklog++
             continue
         }
-        $badges = Get-LLDraftBadges -Content $content -Row $row -Section (Get-DraftSection $d)
+        $badges = Get-LLDraftBadges -Content $content -Row $row -Section (Get-LLDraftSection -Draft $d -DraftsDir $DraftsDir)
         $status = (Get-LLRowProp $row "status").ToLowerInvariant()
         if ((-not $badges.canApprove) -or $status -eq "needs_review") {
             $targets.Add($d)
@@ -360,7 +312,7 @@ function Repair-OneDraft {
     $rel = Get-DraftRelPath $Draft
     $content = Read-LLText $Draft.FullName
     $row = Resolve-LLDraftRegistryRow -Draft $Draft -Content $content
-    $section = Get-DraftSection $Draft
+    $section = Get-LLDraftSection -Draft $Draft -DraftsDir $DraftsDir
     $profile = Get-LLDraftEditorialProfile -Row $row -Section $section
     $issues = @(Get-LLDraftQualityIssues -Content $content -Row $row -Section $section)
     $half = ""
@@ -521,7 +473,7 @@ $draftText
     }
 
     $backup = Backup-Draft -Draft $Draft
-    $raw = Invoke-OllamaRepair -Prompt $prompt
+    $raw = Invoke-LLMRepair -Prompt $prompt
     $fixed = Remove-ExtraHugoFrontMatter -Text $raw
     $fixed = ConvertTo-LLOutlineArticleStructure -Content $fixed -FallbackTitle $title -FallbackDate $date -FallbackSection $section
     $fixed = Repair-LLIndentedCodeFences -Content $fixed
@@ -604,7 +556,7 @@ if (-not $DraftPath -and -not $All) {
     for ($i = 0; $i -lt $targets.Count; $i++) {
         $c = Read-LLText $targets[$i].FullName
         $row = Resolve-LLDraftRegistryRow -Draft $targets[$i] -Content $c
-        $badges = Get-LLDraftBadges -Content $c -Row $row -Section (Get-DraftSection $d)
+        $badges = Get-LLDraftBadges -Content $c -Row $row -Section (Get-LLDraftSection -Draft $d -DraftsDir $DraftsDir)
         $why = ($badges.badges | Where-Object { $_.cls -ne "ok" } | ForEach-Object { $_.text }) -join ", "
         Write-Info ("  [{0,2}] {1}" -f ($i + 1), (Get-DraftRelPath $targets[$i])) "DarkGray"
         Write-Info ("       {0}" -f $why) "DarkGray"
@@ -621,28 +573,18 @@ if (-not $DraftPath -and -not $All) {
 
 if ($Mode -ne "auto") {
     Write-Info ""
-    if ($UseLM) {
-        Write-Info "  LM Studio 헬스체크 ... " "White"
-        try {
-            $lmModels = Invoke-RestMethod -Uri "$LMStudioBase/v1/models" -Method Get -TimeoutSec 5 -ErrorAction Stop
-        } catch {
-            Write-Host "LM Studio 미실행: $LMStudioBase  (lms server start)"
-            exit 1
-        }
-        if ([string]::IsNullOrWhiteSpace($LMStudioModel)) {
-            $LMStudioModel = @($lmModels.data | Where-Object { $_.id -notmatch 'embed' } | Select-Object -ExpandProperty id)[0]
-        }
-        if ([string]::IsNullOrWhiteSpace($LMStudioModel)) { Write-Host "LM Studio에 로드된 모델이 없습니다."; exit 1 }
-        $Model = $LMStudioModel
-    } else {
-        Write-Info "  Ollama 헬스체크 ... " "White"
-        try {
-            $null = Invoke-RestMethod -Uri "$OllamaBase/" -Method Get -TimeoutSec 5 -ErrorAction Stop
-        } catch {
-            Write-Host "Ollama 미실행: $OllamaBase"
-            exit 1
-        }
+    Write-Info "  LM Studio 헬스체크 ... " "White"
+    try {
+        $lmModels = Invoke-RestMethod -Uri "$LMStudioBase/v1/models" -Method Get -TimeoutSec 5 -ErrorAction Stop
+    } catch {
+        Write-Host "LM Studio 미실행: $LMStudioBase  (lms server start)"
+        exit 1
     }
+    if ([string]::IsNullOrWhiteSpace($LMStudioModel)) {
+        $LMStudioModel = @($lmModels.data | Where-Object { $_.id -notmatch 'embed' } | Select-Object -ExpandProperty id)[0]
+    }
+    if ([string]::IsNullOrWhiteSpace($LMStudioModel)) { Write-Host "LM Studio에 로드된 모델이 없습니다."; exit 1 }
+    $Model = $LMStudioModel
 }
 
 $done = 0

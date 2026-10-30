@@ -64,45 +64,16 @@ foreach ($r in $rows) {
     $s = Get-LLProp $r "source_id"; if ($s) { $rowBySid[$s] = $r }
 }
 
-function Resolve-DraftRow {
-    param($Draft, $Content)
-    $sid = Get-LLDraftSourceId $Content
-    if ($sid -and $rowBySid.ContainsKey($sid)) { return $rowBySid[$sid] }
-    if ($rowByTopic.ContainsKey($Draft.BaseName)) { return $rowByTopic[$Draft.BaseName] }
-    return $null
-}
-
-function Test-TodayDraft {
-    param($Draft, $Row)
-
-    if ($IncludeBacklog) { return $true }
-    if ($Draft.Name -like "$TodayStr*") { return $true }
-    if ($Row) {
-        $d = Get-LLProp $Row "date_added"
-        if ($d -eq $TodayStr) { return $true }
-    }
-    if ($Draft.LastWriteTime.ToString("yyyy-MM-dd") -eq $TodayStr) { return $true }
-    return $false
-}
-
-function Get-DraftSection {
-    param([Parameter(Mandatory)][System.IO.FileInfo]$Draft)
-    $rel = $Draft.FullName.Replace($DraftsDir + "\", "").Replace("\", "/")
-    $sectionName = ($rel -split "/")[0]
-    if (-not $sectionName) { return "learning" }
-    return $sectionName.ToLowerInvariant()
-}
-
 # ── 대상 수집 ──
 if ($DraftPath -ne "") {
     $targets = @(Get-Item -LiteralPath $DraftPath -ErrorAction SilentlyContinue)
     if ($SectionFilter) {
-        $targets = @($targets | Where-Object { (Get-DraftSection $_) -eq $SectionFilter })
+        $targets = @($targets | Where-Object { (Get-LLDraftSection -Draft $_ -DraftsDir $DraftsDir) -eq $SectionFilter })
     }
 } else {
     $allDrafts = @(Get-ChildItem -LiteralPath $DraftsDir -Recurse -Filter "*.md" -File | Sort-Object FullName)
     if ($SectionFilter) {
-        $allDrafts = @($allDrafts | Where-Object { (Get-DraftSection $_) -eq $SectionFilter })
+        $allDrafts = @($allDrafts | Where-Object { (Get-LLDraftSection -Draft $_ -DraftsDir $DraftsDir) -eq $SectionFilter })
     }
     if ($allDrafts.Count -eq 0) {
         if ($SectionFilter) {
@@ -118,7 +89,7 @@ if ($DraftPath -ne "") {
         $visibleDrafts = [System.Collections.Generic.List[object]]::new()
         foreach ($d in $allDrafts) {
             $c0 = Read-LLText $d.FullName
-            $row0 = Resolve-DraftRow $d $c0
+            $row0 = Resolve-LLDraftRow $d $c0 -RowBySid $rowBySid -RowByTopic $rowByTopic
             if (Test-LLDraftByproduct -Draft $d -Row $row0) {
                 $excludedByproducts++
                 continue
@@ -131,8 +102,8 @@ if ($DraftPath -ne "") {
         $visibleDrafts = [System.Collections.Generic.List[object]]::new()
         foreach ($d in $allDrafts) {
             $c0 = Read-LLText $d.FullName
-            $row0 = Resolve-DraftRow $d $c0
-            if (-not (Test-TodayDraft -Draft $d -Row $row0)) {
+            $row0 = Resolve-LLDraftRow $d $c0 -RowBySid $rowBySid -RowByTopic $rowByTopic
+            if (-not (Test-LLTodayDraft -Draft $d -Row $row0 -TodayStr $TodayStr -IncludeBacklog:$IncludeBacklog)) {
                 $excludedBacklog++
                 continue
             }
@@ -161,7 +132,7 @@ if ($DraftPath -ne "") {
     for ($i = 0; $i -lt $allDrafts.Count; $i++) {
         $rel = $allDrafts[$i].FullName.Replace($DraftsDir + "\", "").Replace("\", "/")
         $c = Read-LLText $allDrafts[$i].FullName
-        $row = Resolve-DraftRow $allDrafts[$i] $c
+        $row = Resolve-LLDraftRow $allDrafts[$i] $c -RowBySid $rowBySid -RowByTopic $rowByTopic
         $section = ($rel -split "/")[0]
         $b = Get-LLDraftBadges -Content $c -Row $row -Section $section
         $readyPath = Join-Path (Join-Path $ReadyDir $section) $allDrafts[$i].Name
@@ -217,7 +188,7 @@ Write-Host ""
 foreach ($d in $targets) {
     $rel = $d.FullName.Replace($DraftsDir + "\", "").Replace("\", "/")
     $content = Read-LLText $d.FullName
-    $row = Resolve-DraftRow $d $content
+    $row = Resolve-LLDraftRow $d $content -RowBySid $rowBySid -RowByTopic $rowByTopic
     $isByproduct = Test-LLDraftByproduct -Draft $d -Row $row
     $section = ($rel -split "/")[0]
     $b = Get-LLDraftBadges -Content $content -Row $row -ByproductOverride $isByproduct -Section $section

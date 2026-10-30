@@ -60,6 +60,7 @@ $ErrorActionPreference = "Stop"
 Import-Module (Join-Path $PSScriptRoot "core\LearningLog.LocalCore.psm1") -Force -DisableNameChecking
 Import-Module (Join-Path $PSScriptRoot "core\LearningLog.PublishPreflight.psm1") -Force -DisableNameChecking
 Import-Module (Join-Path $PSScriptRoot "core\LearningLog.PublishGitGuard.psm1") -Force -DisableNameChecking
+Import-Module (Join-Path $PSScriptRoot "core\LearningLog.Publish.psm1") -Force -DisableNameChecking
 
 # ─────────────────────────────────────────────────────────
 # 경로 설정
@@ -105,33 +106,6 @@ Write-Host "========================================" -ForegroundColor Cyan
 # 파일은 발행 선택 목록에 노출하지 않는다.
 $selectionRows = @(Get-LLRegistryRows)
 $approvalRows = @(Get-LLApprovalLogRows)
-function Resolve-PublishRegistryRow {
-    param([Parameter(Mandatory)][System.IO.FileInfo]$Draft)
-    $content = Read-LLText $Draft.FullName
-    $sid = Get-LLDraftSourceId $content
-    if ($sid) {
-        $matches = @($selectionRows | Where-Object { (Get-LLProp $_ 'source_id') -eq $sid })
-        if ($matches.Count -eq 1) { return $matches[0] }
-        return $null
-    }
-    $matches = @($selectionRows | Where-Object { (Get-LLProp $_ 'topic') -eq $Draft.BaseName })
-    if ($matches.Count -ne 1) { $matches = @($selectionRows | Where-Object { (Get-LLProp $_ 'file_name') -eq $Draft.Name }) }
-    if ($matches.Count -eq 1) { return $matches[0] }
-    return $null
-}
-function Test-PublishStatusAllowed {
-    param([Parameter(Mandatory)][System.IO.FileInfo]$Draft)
-    $row = Resolve-PublishRegistryRow -Draft $Draft
-    if ($null -eq $row) { return $false }
-    $status = (Get-LLProp $row "status").Trim().ToLowerInvariant()
-    if ($status -ne 'approved' -and -not ($IncludePublished -and $status -eq 'published')) { return $false }
-    if (-not (Test-LLPublishableSource $row)) { return $false }
-    $relative = $Draft.FullName.Substring(($DraftsDir.TrimEnd('\') + '\').Length).Replace('\', '/')
-    $section = ($relative -split '/')[0]
-    $snapshot = Get-LLApprovalSnapshotStatus -ReadyRoot $DraftsDir -ApprovedPath $Draft.FullName -SourceId (Get-LLProp $row 'source_id') -Section $section -FileName $Draft.Name -Rows $approvalRows
-    return ($snapshot.status -eq 'match')
-}
-
 # ─────────────────────────────────────────────────────────
 # blog-source 존재 확인
 # ─────────────────────────────────────────────────────────
@@ -150,68 +124,26 @@ try { $null = git --version 2>&1 } catch {
 # ─────────────────────────────────────────────────────────
 # draft 파일 목록 수집
 # ─────────────────────────────────────────────────────────
-function New-PublishPlan {
-    param([Parameter(Mandatory)]$Draft)
-
-    $rel = $Draft.FullName.Replace($DraftsDir + "\", "").Replace("\", "/")
-    $section = ($rel -split "/")[0]
-    $fname = $Draft.Name
-    $destDir = Join-Path $BlogSourceRoot "content\$section"
-    $destPath = Join-Path $destDir $fname
-    $pubMarker = Join-Path $PublishedDir $fname
-    # "발행됨" = content 복사본 + 06_published 표식이 둘 다 있을 때만.
-    # 06_published 는 배포(빌드+푸시) 성공 후에만 기록되므로,
-    # 빌드/푸시 실패로 복사만 된 글은 다음 실행에서 다시 신규로 잡힌다.
-    $isUpdate = (Test-Path -LiteralPath $destPath) -and (Test-Path -LiteralPath $pubMarker)
-
-    return [pscustomobject]@{
-        Draft = $Draft
-        Rel = $rel
-        Section = $section
-        FileName = $fname
-        DestDir = $destDir
-        DestPath = $destPath
-        IsUpdate = $isUpdate
-    }
-}
-
-function Test-PublishSection {
-    param([Parameter(Mandatory)]$Draft)
-    if (-not $SectionFilter) { return $true }
-    $rel = $Draft.FullName.Replace($DraftsDir + "\", "").Replace("\", "/")
-    $sectionName = (($rel -split "/")[0]).ToLowerInvariant()
-    return ($sectionName -eq $SectionFilter)
-}
-
 $excludedPublished = 0
 $excludedBacklog = 0
 $excludedUnapproved = 0
 
-function Test-TodayDraft {
-    param([Parameter(Mandatory)]$Draft)
-
-    if ($IncludeBacklog) { return $true }
-    if ($Draft.Name -like "$TodayStr*") { return $true }
-    if ($Draft.LastWriteTime.ToString("yyyy-MM-dd") -eq $TodayStr) { return $true }
-    return $false
-}
-
 if ($DraftPath.Count -gt 0) {
     $targets = @($DraftPath | ForEach-Object { Get-Item -LiteralPath $_ -ErrorAction SilentlyContinue })
-    if ($SectionFilter) { $targets = @($targets | Where-Object { Test-PublishSection $_ }) }
+    if ($SectionFilter) { $targets = @($targets | Where-Object { Test-LLPublishSection -Draft $_ -ReadyRoot $DraftsDir -SectionFilter $SectionFilter }) }
 } elseif ($All) {
     $allDrafts = @(Get-ChildItem -Path $DraftsDir -Recurse -Filter "*.md" -File | Sort-Object FullName)
-    if ($SectionFilter) { $allDrafts = @($allDrafts | Where-Object { Test-PublishSection $_ }) }
+    if ($SectionFilter) { $allDrafts = @($allDrafts | Where-Object { Test-LLPublishSection -Draft $_ -ReadyRoot $DraftsDir -SectionFilter $SectionFilter }) }
     $beforeStatusFilter = $allDrafts.Count
-    $allDrafts = @($allDrafts | Where-Object { Test-PublishStatusAllowed $_ })
+    $allDrafts = @($allDrafts | Where-Object { Test-LLPublishStatusAllowed -Draft $_ -Rows $selectionRows -ApprovalRows $approvalRows -ReadyRoot $DraftsDir -IncludePublished:$IncludePublished })
     $excludedUnapproved = $beforeStatusFilter - $allDrafts.Count
     if (-not $IncludePublished) {
-        $visibleDrafts = @($allDrafts | Where-Object { -not (New-PublishPlan -Draft $_).IsUpdate })
+        $visibleDrafts = @($allDrafts | Where-Object { -not (New-LLPublishPlan -Draft $_ -ReadyRoot $DraftsDir -BlogRoot $BlogSourceRoot -PublishedDir $PublishedDir).IsUpdate })
         $excludedPublished = $allDrafts.Count - $visibleDrafts.Count
         $allDrafts = $visibleDrafts
     }
     if (-not $IncludeBacklog) {
-        $visibleDrafts = @($allDrafts | Where-Object { Test-TodayDraft -Draft $_ })
+        $visibleDrafts = @($allDrafts | Where-Object { Test-LLTodayDraft -Draft $_ -TodayStr $TodayStr -IncludeBacklog:$IncludeBacklog })
         $excludedBacklog = $allDrafts.Count - $visibleDrafts.Count
         $allDrafts = $visibleDrafts
     }
@@ -219,9 +151,9 @@ if ($DraftPath.Count -gt 0) {
 } else {
     # 대화형 선택
     $allDrafts = @(Get-ChildItem -Path $DraftsDir -Recurse -Filter "*.md" -File | Sort-Object FullName)
-    if ($SectionFilter) { $allDrafts = @($allDrafts | Where-Object { Test-PublishSection $_ }) }
+    if ($SectionFilter) { $allDrafts = @($allDrafts | Where-Object { Test-LLPublishSection -Draft $_ -ReadyRoot $DraftsDir -SectionFilter $SectionFilter }) }
     $beforeStatusFilter = $allDrafts.Count
-    $allDrafts = @($allDrafts | Where-Object { Test-PublishStatusAllowed $_ })
+    $allDrafts = @($allDrafts | Where-Object { Test-LLPublishStatusAllowed -Draft $_ -Rows $selectionRows -ApprovalRows $approvalRows -ReadyRoot $DraftsDir -IncludePublished:$IncludePublished })
     $excludedUnapproved = $beforeStatusFilter - $allDrafts.Count
     if ($allDrafts.Count -eq 0) {
         if ($SectionFilter) {
@@ -234,12 +166,12 @@ if ($DraftPath.Count -gt 0) {
     }
 
     if (-not $IncludePublished) {
-        $visibleDrafts = @($allDrafts | Where-Object { -not (New-PublishPlan -Draft $_).IsUpdate })
+        $visibleDrafts = @($allDrafts | Where-Object { -not (New-LLPublishPlan -Draft $_ -ReadyRoot $DraftsDir -BlogRoot $BlogSourceRoot -PublishedDir $PublishedDir).IsUpdate })
         $excludedPublished = $allDrafts.Count - $visibleDrafts.Count
         $allDrafts = $visibleDrafts
     }
     if (-not $IncludeBacklog) {
-        $visibleDrafts = @($allDrafts | Where-Object { Test-TodayDraft -Draft $_ })
+        $visibleDrafts = @($allDrafts | Where-Object { Test-LLTodayDraft -Draft $_ -TodayStr $TodayStr -IncludeBacklog:$IncludeBacklog })
         $excludedBacklog = $allDrafts.Count - $visibleDrafts.Count
         $allDrafts = $visibleDrafts
     }
@@ -294,7 +226,7 @@ if ($DraftPath.Count -gt 0) {
 }
 
 if (-not $SelectionFile) {
-    $invalidTargets = @($targets | Where-Object { -not (Test-PublishStatusAllowed $_) })
+    $invalidTargets = @($targets | Where-Object { -not (Test-LLPublishStatusAllowed -Draft $_ -Rows $selectionRows -ApprovalRows $approvalRows -ReadyRoot $DraftsDir -IncludePublished:$IncludePublished) })
     if ($invalidTargets.Count -gt 0) {
         $invalidNames = @($invalidTargets | ForEach-Object { $_.Name }) -join ', '
         throw "승인 당시 파일 해시와 일치하지 않거나 발행 자격이 없는 승인본입니다. 미리보기에서 다시 승인하세요: $invalidNames"
@@ -314,7 +246,7 @@ $newTargets = [System.Collections.Generic.List[object]]::new()
 $updateTargets = [System.Collections.Generic.List[object]]::new()
 
 foreach ($draft in $targets) {
-    $plan = New-PublishPlan -Draft $draft
+    $plan = New-LLPublishPlan -Draft $draft -ReadyRoot $DraftsDir -BlogRoot $BlogSourceRoot -PublishedDir $PublishedDir
     $targetPlans.Add($plan)
     if ($plan.IsUpdate) { $updateTargets.Add($plan) } else { $newTargets.Add($plan) }
 }
@@ -340,239 +272,9 @@ if ($updateTargets.Count -gt 0) {
 # ─────────────────────────────────────────────────────────
 # 헬퍼: front matter 처리
 # ─────────────────────────────────────────────────────────
-function Remove-ExtraHugoFrontMatter {
-    param([string]$Text)
-    $lines = $Text -split "`r?`n"
-    if ($lines.Count -eq 0) { return $Text }
-
-    $start = 0
-    if ($lines[0].Trim() -eq "---") {
-        for ($i = 1; $i -lt $lines.Count; $i++) {
-            if ($lines[$i].Trim() -eq "---") {
-                $start = $i + 1
-                break
-            }
-        }
-    }
-
-    $out = [System.Collections.Generic.List[string]]::new()
-    for ($i = 0; $i -lt $start; $i++) { $out.Add($lines[$i]) }
-
-    $i = $start
-    while ($i -lt $lines.Count) {
-        $isBlock = $false
-        $end = -1
-        if ($lines[$i].Trim() -eq "---") {
-            for ($j = $i + 1; $j -lt [Math]::Min($lines.Count, $i + 20); $j++) {
-                if ($lines[$j].Trim() -eq "---") { $end = $j; break }
-            }
-            if ($end -gt $i) {
-                $body = @($lines[($i + 1)..($end - 1)] | ForEach-Object { $_.Trim().ToLowerInvariant() })
-                $keyCount = @($body | Where-Object {
-                    $_.StartsWith("title:") -or $_.StartsWith("date:") -or $_.StartsWith("draft:") -or
-                    $_.StartsWith("categories:") -or $_.StartsWith("tags:") -or $_.StartsWith("description:")
-                }).Count
-                $hasTitle = @($body | Where-Object { $_.StartsWith("title:") }).Count -gt 0
-                $hasDateOrDraft = @($body | Where-Object { $_.StartsWith("date:") -or $_.StartsWith("draft:") }).Count -gt 0
-                $isBlock = $hasTitle -and $hasDateOrDraft -and ($keyCount -ge 3)
-            }
-        }
-
-        if ($isBlock) {
-            while ($out.Count -gt 0 -and $out[$out.Count - 1].Trim() -eq "") { $out.RemoveAt($out.Count - 1) }
-            if ($out.Count -gt 0 -and $out[$out.Count - 1].Trim() -eq "---") { $out.RemoveAt($out.Count - 1) }
-            $i = $end + 1
-            while ($i -lt $lines.Count -and $lines[$i].Trim() -eq "") { $i++ }
-            continue
-        }
-
-        $out.Add($lines[$i])
-        $i++
-    }
-
-    return (($out -join "`n").TrimEnd() + "`n")
-}
-
-function Process-FrontMatter {
-    param(
-        [string]$Content,
-        [string]$ModelName = "local-llm"
-    )
-
-    $out = ConvertTo-LLPublishMarkdown -Content $Content -ModelName $ModelName
-    # Hugo v0.144+ 에서 제거된 front matter 키를 발행 시점에 자동 제거
-    # (남아 있으면 hugo 빌드가 ERROR 로 중단됨 — 2026-07-12 lang 사건)
-    $out = $out -replace '(?m)^\s*lang\s*:\s*.*\r?\n', ''
-    return $out
-}
-
 # ─────────────────────────────────────────────────────────
 # 헬퍼: registry status → published
 # ─────────────────────────────────────────────────────────
-function _UpdateRegistry {
-    param([string]$Sid)
-    $null = Set-LLRegistryStatus -SourceId $Sid -Status "published"
-}
-
-function Get-HugoCommandPath {
-    # 1) 허브 공용 portable_kit\tools\hugo.exe
-    $localHugo = Join-Path (Split-Path $BlogSourceRoot -Parent) "portable_kit\tools\hugo.exe"
-    if (Test-Path -LiteralPath $localHugo) { return $localHugo }
-
-    # 2) PATH
-    $cmd = Get-Command hugo -ErrorAction SilentlyContinue
-    if ($cmd) { return $cmd.Source }
-
-    # 3) winget 설치본 (Hugo.Hugo.Extended) — 현재 사용자 기준
-    $knownRoot = Join-Path $env:LOCALAPPDATA "Microsoft\WinGet\Packages"
-    if (Test-Path -LiteralPath $knownRoot) {
-        $found = Get-ChildItem -LiteralPath $knownRoot -Recurse -Filter "hugo.exe" -File -ErrorAction SilentlyContinue |
-            Where-Object { $_.FullName -like "*Hugo.Hugo.Extended*" } |
-            Select-Object -First 1
-        if ($found) { return $found.FullName }
-    }
-    return ""
-}
-
-function Get-DraftRegistryRow {
-    param(
-        [string]$DraftName,
-        [string]$RawContent
-    )
-    $sid = Get-LLDraftSourceId -Content $RawContent
-    $rows = $selectionRows
-    if ($sid) {
-        $matches = @($rows | Where-Object { $_.source_id -eq $sid })
-        if ($matches.Count -eq 1) { return $matches[0] }
-        return $null
-    }
-    $topic = [System.IO.Path]::GetFileNameWithoutExtension($DraftName)
-    $matches = @($rows | Where-Object { $_.topic -eq $topic })
-    if ($matches.Count -ne 1) { $matches = @($rows | Where-Object { $_.file_name -eq $DraftName }) }
-    if ($matches.Count -eq 1) { return $matches[0] }
-    return $null
-}
-
-function Get-FrontMatterValue {
-    param(
-        [Parameter(Mandatory)][string]$Content,
-        [Parameter(Mandatory)][string]$Key
-    )
-    $pattern = "(?m)^$([regex]::Escape($Key)):\s*`"?(.+?)`"?\s*$"
-    if ($Content -match $pattern) { return $Matches[1].Trim() }
-    return ""
-}
-
-function Test-DraftQualityGate {
-    param(
-        [Parameter(Mandatory)][string]$DraftName,
-        [Parameter(Mandatory)][string]$RawContent,
-        $SourceRow
-    )
-
-    $section = ""
-    if ($SourceRow) {
-        $sourcePath = (Get-LLProp $SourceRow "source_path") -replace "\\", "/"
-        if ($sourcePath -match '(?i)(?:^|/)04_blog_drafts/([^/]+)/') { $section = $Matches[1] }
-    }
-    $issues = @(Get-LLDraftQualityIssues -Content $RawContent -Row $SourceRow -Section $section)
-    if ($issues.Count -gt 0) {
-        return [pscustomobject]@{ Ok = $false; Reason = "draft quality: " + ($issues -join ", ") }
-    }
-
-    if ($null -ne $SourceRow) {
-        $status = (Get-LLProp $SourceRow "status").ToLowerInvariant()
-        if ($status -in @("needs_review", "archived", "rejected")) {
-            return [pscustomobject]@{ Ok = $false; Reason = "status gate: $status" }
-        }
-
-        $topic = (Get-LLProp $SourceRow "topic").ToLowerInvariant()
-        $category = (Get-LLProp $SourceRow "source_category").ToLowerInvariant()
-        $draftTitle = (Get-FrontMatterValue -Content $RawContent -Key "title").ToLowerInvariant()
-
-        # High-signal mismatch guard for single-source drafts only.
-        # Daily merged posts can legitimately mention several topics in the title.
-        $isDailyMerged = ($category -eq "daily_merged" -or $topic -match '^\d{4}-\d{2}-\d{2}-(am|pm)-daily$')
-        $looksLikePandas = ($draftTitle -match "pandas|read[_\. -]?csv|\bcsv\b")
-        $sourceIsPandas = ($topic -match "pandas|read[_\. -]?csv|\bcsv\b")
-        if (-not $isDailyMerged -and $looksLikePandas -and -not $sourceIsPandas) {
-            return [pscustomobject]@{
-                Ok = $false
-                Reason = "title/topic mismatch: title looks like pandas/read_csv but topic is '$topic'"
-            }
-        }
-    }
-
-    return [pscustomobject]@{ Ok = $true; Reason = "" }
-}
-
-function Get-DraftReferencedAssetPaths {
-    param([Parameter(Mandatory)][string]$Content)
-
-    $refs = @([regex]::Matches($Content, '!\[[^\]]*\]\((/images/[^)\s]+)\)') |
-        ForEach-Object { $_.Groups[1].Value } |
-        Select-Object -Unique)
-    $paths = [System.Collections.Generic.List[string]]::new()
-    foreach ($ref in $refs) {
-        $relative = [Uri]::UnescapeDataString($ref.TrimStart("/")) -replace '\\', '/'
-        if ($relative -match '(^|/)\.\.(/|$)' -or [IO.Path]::IsPathRooted($relative)) {
-            throw "허용되지 않은 이미지 경로: $ref"
-        }
-        $paths.Add($relative)
-    }
-    return $paths.ToArray()
-}
-
-function Copy-DraftReferencedAssets {
-    param(
-        [Parameter(Mandatory)][string]$Content,
-        [AllowNull()][System.Collections.Generic.List[object]]$CreatedArtifacts = $null
-    )
-
-    $refs = @(Get-DraftReferencedAssetPaths -Content $Content)
-    if ($refs.Count -eq 0) { return 0 }
-    if (-not (Test-Path -LiteralPath $DraftAssetRoot)) {
-        throw "초안 이미지 저장소가 없습니다: $DraftAssetRoot"
-    }
-
-    $assetRootFull = (Resolve-Path -LiteralPath $DraftAssetRoot).Path
-    $copied = 0
-    foreach ($assetPath in $refs) {
-        $relative = $assetPath -replace '/', '\'
-        $source = Join-Path $assetRootFull $relative
-        if (-not (Test-Path -LiteralPath $source -PathType Leaf)) { throw "초안 이미지 없음: /images/$assetPath" }
-        $sourceFull = (Resolve-Path -LiteralPath $source).Path
-        if (-not $sourceFull.StartsWith($assetRootFull, [StringComparison]::OrdinalIgnoreCase)) {
-            throw "초안 이미지 저장소 밖의 경로: $assetPath"
-        }
-
-        $ext = [IO.Path]::GetExtension($sourceFull).ToLowerInvariant()
-        if ($ext -notin @(".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg")) {
-            throw "지원하지 않는 이미지 형식: $assetPath"
-        }
-        $dest = Join-Path (Join-Path $BlogSourceRoot "static") $relative
-        $destParent = Split-Path -Parent $dest
-        if (-not (Test-Path -LiteralPath $destParent)) {
-            New-Item -ItemType Directory -Path $destParent -Force | Out-Null
-        }
-        $disposition = Get-LLPublishDestinationDisposition `
-            -DestinationPath $dest `
-            -ExpectedFilePath $sourceFull `
-            -Label '블로그 이미지'
-        if ($disposition -eq 'Create') {
-            # CreateNew prevents a file appearing between the check and copy from being overwritten.
-            [System.IO.File]::Copy($sourceFull, $dest, $false)
-            if ($null -ne $CreatedArtifacts) {
-                $CreatedArtifacts.Add([pscustomobject]@{
-                    full_path=$dest; repo_path=$dest.Substring($BlogSourceRoot.Length + 1).Replace('\','/'); sha256=(Get-LLHash $dest)
-                })
-            }
-            $copied++
-        }
-    }
-    return $copied
-}
-
 # ─────────────────────────────────────────────────────────
 # 발행 처리
 # ─────────────────────────────────────────────────────────
@@ -584,119 +286,11 @@ $skippedPublishTargets = [System.Collections.Generic.List[string]]::new()
 # 배포 성공 후에만 06_published 표식 + registry published 를 기록하기 위한 대기열
 $pendingRecords = [System.Collections.Generic.List[object]]::new()
 $sourcePathsToStage = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
-$createdPublishArtifacts = [System.Collections.Generic.List[object]]::new()
-$publishAttemptId = [guid]::NewGuid().ToString('N')
-$script:PublishAttemptHashes = @{}
-$script:PublishOutcomeRecorded = $false
-$script:PublicStageAttempted = $false
-$script:PublicCommitAttempted = $false
-$script:PublicCommitCompleted = $false
-$script:PublicPushAttempted = $false
-$script:LivePushCompleted = $false
-
-function Move-CreatedPublishArtifactsToTrash {
-    param([Parameter(Mandatory)][string]$AttemptId)
-    $moved = [System.Collections.Generic.List[string]]::new()
-    $skipped = [System.Collections.Generic.List[string]]::new()
-    if ($script:PublicStageAttempted -or $script:PublicCommitAttempted -or $script:PublicCommitCompleted -or $script:PublicPushAttempted -or $script:LivePushCompleted) {
-        return [pscustomobject]@{ moved=@(); skipped=@('공개 저장소 Git 상태가 바뀌었을 수 있어 자동 정리를 보류했습니다.') }
-    }
-    $trashRunRoot = Get-LLPath ('.trash\publish_attempt_' + $AttemptId + '\blog-source')
-    $trashPrefix = [IO.Path]::GetFullPath($trashRunRoot).TrimEnd('\','/') + [IO.Path]::DirectorySeparatorChar
-    foreach ($artifact in $createdPublishArtifacts) {
-        if (-not (Test-Path -LiteralPath $artifact.full_path -PathType Leaf)) { continue }
-        if ((Get-LLHash $artifact.full_path) -ine $artifact.sha256) {
-            $skipped.Add("$($artifact.repo_path): 복사 후 파일이 바뀌어 보존")
-            continue
-        }
-        $relative = ([string]$artifact.repo_path).Replace('\','/')
-        if ([IO.Path]::IsPathRooted($relative) -or $relative.Split('/') -contains '..') {
-            $skipped.Add("$($artifact.repo_path): 저장소 밖 경로라 보존")
-            continue
-        }
-        $destination = Join-Path $trashRunRoot ($relative -replace '/', [string][IO.Path]::DirectorySeparatorChar)
-        if (-not [IO.Path]::GetFullPath($destination).StartsWith($trashPrefix, [StringComparison]::OrdinalIgnoreCase)) {
-            $skipped.Add("$($artifact.repo_path): 휴지통 경계를 벗어나 보존")
-            continue
-        }
-        if (Test-Path -LiteralPath $destination) {
-            $skipped.Add("$($artifact.repo_path): 휴지통 목적지 충돌로 보존")
-            continue
-        }
-        $parent = Split-Path -Parent $destination
-        if (-not (Test-Path -LiteralPath $parent)) { New-Item -ItemType Directory -Path $parent -Force | Out-Null }
-        try {
-            [IO.File]::Move($artifact.full_path, $destination)
-            $moved.Add("$($artifact.repo_path) -> $(Get-LLRelativePath $destination)")
-        } catch { $skipped.Add("$($artifact.repo_path): $($_.Exception.Message)") }
-    }
-    if ($moved.Count -gt 0 -or $skipped.Count -gt 0) {
-        $manifest = [ordered]@{
-            version=1; disposition='retryable_publish_failure_cleanup'; attempt_id=$AttemptId
-            created_at=[DateTimeOffset]::Now.ToString('o'); moved=@($moved); skipped=@($skipped)
-            ready_approvals_preserved=$true; published_content_touched=$false
-        }
-        Write-LLText -Path (Join-Path $trashRunRoot '_cleanup.json') -Content (ConvertTo-Json $manifest -Depth 4)
-    }
-    return [pscustomobject]@{ moved=@($moved); skipped=@($skipped) }
-}
-
-function Write-PublishAttemptOutcome {
-    param(
-        [Parameter(Mandatory)][string]$Status,
-        [string]$FailureCode = '',
-        [string]$Message = '',
-        [string]$PublishedDate = '',
-        [string[]]$CleanupPaths = @()
-    )
-    if ($script:PublishOutcomeRecorded) { return }
-    foreach ($targetPlan in $targetPlans) {
-        $relative = [string]$targetPlan.Rel
-        $sourceId = ''
-        if ($preflightCache.ContainsKey($targetPlan.Draft.FullName)) {
-            $sourceId = Get-LLProp $preflightCache[$targetPlan.Draft.FullName].SourceRow 'source_id'
-        } else {
-            $row = Resolve-PublishRegistryRow -Draft $targetPlan.Draft
-            if ($null -ne $row) { $sourceId = Get-LLProp $row 'source_id' }
-        }
-        $contentHash = ''
-        if ($preflightCache.ContainsKey($targetPlan.Draft.FullName)) {
-            $contentHash = [string]$preflightCache[$targetPlan.Draft.FullName].DraftSha256
-        } elseif ($script:PublishAttemptHashes.ContainsKey($targetPlan.Draft.FullName)) {
-            $contentHash = [string]$script:PublishAttemptHashes[$targetPlan.Draft.FullName]
-        } else {
-            $contentHash = Get-LLHash $targetPlan.Draft.FullName
-        }
-        $null = Add-LLPublishLedgerEntry `
-            -DraftPath ('05_ready_to_publish/' + $relative) `
-            -HugoTargetPath ('content/' + $targetPlan.Section + '/' + $targetPlan.FileName) `
-            -PublishedDate $PublishedDate -PublicUrl '' -Status $Status -SourceId $sourceId `
-            -ContentSha256 $contentHash -FailureCode $FailureCode -Message $Message `
-            -CleanupPaths $CleanupPaths -AttemptId $publishAttemptId
-    }
-    $script:PublishOutcomeRecorded = $true
-}
-
-function Write-PublishAbortHint {
-    param([string]$FailureCode = 'publish_aborted', [string]$Message = '')
-    $cleanupPaths = @()
-    if (-not $script:PublishOutcomeRecorded) {
-        $status = if ($script:PublicStageAttempted -or $script:PublicCommitAttempted -or $script:PublicCommitCompleted -or $script:PublicPushAttempted -or $script:LivePushCompleted) { 'reconcile_required' } else { 'retryable_failed' }
-        if ($status -eq 'retryable_failed') {
-            $cleanup = Move-CreatedPublishArtifactsToTrash -AttemptId $publishAttemptId
-            $cleanupPaths = @($cleanup.moved)
-            if (@($cleanup.skipped).Count) { $Message = (($Message + ' · 정리 보류: ' + (@($cleanup.skipped) -join '; ')).Trim(' ', '·')) }
-        }
-        Write-PublishAttemptOutcome -Status $status -FailureCode $FailureCode -Message $Message -CleanupPaths $cleanupPaths
-    }
-    Write-Host ""
-    if ($script:PublicStageAttempted -or $script:PublicCommitAttempted -or $script:PublicCommitCompleted -or $script:PublicPushAttempted -or $script:LivePushCompleted) {
-        Write-Host "  공개 저장소 Git 상태와 라이브 반영 여부를 대조해야 합니다. 자동 정리·재발행을 멈추고 publish_ledger.csv에 reconcile_required로 기록했습니다." -ForegroundColor Yellow
-    } else {
-        Write-Host "  실패 원인을 publish_ledger.csv에 기록했습니다. 승인본은 보존되어 다시 시도할 수 있습니다." -ForegroundColor Yellow
-        if ($cleanupPaths.Count) { Write-Host ("  이번 시도에서 새로 만든 미발행 사본은 .trash 로 이동했습니다: {0}" -f ($cleanupPaths -join ', ')) -ForegroundColor DarkGray }
-    }
-}
+# 발행 한 번의 공유 상태(시도 ID·플래그·생성 사본·사전검사 캐시). 실패 처리 함수가 이 객체를 받는다.
+$ctx = New-LLPublishContext -ResolveRow { param($Draft) Resolve-LLPublishRegistryRow -Draft $Draft -Rows $selectionRows }
+$ctx.TrashRunRoot = Get-LLPath ('.trash\publish_attempt_' + $ctx.AttemptId + '\blog-source')
+$ctx.TargetPlans = $targetPlans
+$createdPublishArtifacts = $ctx.CreatedArtifacts
 
 if ($SelectionFile) {
     # 목록을 연 뒤 승인이 취소되거나 본문이 바뀌었으면 복사·빌드·푸시 전에 중단한다.
@@ -708,253 +302,31 @@ if ($SelectionFile) {
 }
 # 발행 전 모든 선택 파일을 먼저 검사한다. 한 건이라도 WARN/FAIL이면
 # content·이미지 복사, Hugo, Git 동작 전에 전체 선택을 중단한다.
-$preflightCache = @{}
-$preflightFailures = [System.Collections.Generic.List[string]]::new()
-foreach ($targetPlan in $targetPlans) {
-    $draft = $targetPlan.Draft
-    $relative = $draft.FullName.Substring(($DraftsDir.TrimEnd('\') + '\').Length).Replace('\', '/')
-    try {
-        $expectedHash = ''
-        if ($SelectionFile) {
-            $selectedFile = @($selection.files | Where-Object { ([string]$_.path) -ceq $relative })
-            if ($selectedFile.Count -ne 1) { throw 'selection_entry_missing' }
-            $expectedHash = [string]$selectedFile[0].hash
-            $script:PublishAttemptHashes[$draft.FullName] = $expectedHash.ToLowerInvariant()
-        }
-        $rawHashBefore = Get-LLHash $draft.FullName
-        if (-not $script:PublishAttemptHashes.ContainsKey($draft.FullName) -and $rawHashBefore) {
-            $script:PublishAttemptHashes[$draft.FullName] = $rawHashBefore.ToLowerInvariant()
-        }
-        $raw = [System.IO.File]::ReadAllText($draft.FullName, [System.Text.Encoding]::UTF8)
-        $rawHashAfter = Get-LLHash $draft.FullName
-        if (-not $rawHashBefore -or $rawHashBefore -ine $rawHashAfter) { throw 'draft_changed_during_preflight_read' }
-        $script:PublishAttemptHashes[$draft.FullName] = $rawHashAfter.ToLowerInvariant()
-        $sourceRow = Get-DraftRegistryRow -DraftName $draft.Name -RawContent $raw
-        $processed = Process-FrontMatter -Content $raw
-        $registryStatus = ''
-        $publicPolicy = ''
-        $sourceCategory = ''
-        if ($null -ne $sourceRow) {
-            $registryStatus = Get-LLProp $sourceRow 'status'
-            $publicPolicy = Get-LLProp $sourceRow 'public_policy'
-            $sourceCategory = Get-LLProp $sourceRow 'source_category'
-        }
-        $preflight = Invoke-LLPublishPreflight `
-            -Path $draft.FullName `
-            -ReadyRoot $DraftsDir `
-            -ExpectedSha256 $expectedHash `
-            -RegistryStatus $registryStatus `
-            -PublicPolicy $publicPolicy `
-            -SourceCategory $sourceCategory `
-            -OriginalContent $raw `
-            -Content $processed `
-            -DraftAssetRoot $DraftAssetRoot `
-            -AllowPublished:$IncludePublished
-        if ($preflight.status -ne 'PASS') {
-            $codes = @($preflight.findings | ForEach-Object code) -join ', '
-            $preflightFailures.Add("$relative [$($preflight.status)]: $codes")
-            continue
-        }
-        $quality = Test-DraftQualityGate -DraftName $draft.Name -RawContent $processed -SourceRow $sourceRow
-        if (-not $quality.Ok) {
-            $preflightFailures.Add("$relative [FAIL]: draft_quality_gate")
-            continue
-        }
-        $preflightCache[$draft.FullName] = [pscustomobject]@{
-            Raw = $raw
-            DraftSha256 = $rawHashAfter.ToLowerInvariant()
-            SourceRow = $sourceRow
-            Processed = $processed
-            Result = $preflight
-        }
-    } catch {
-        $preflightFailures.Add("$relative [FAIL]: preflight_execution_error")
-    }
-}
+$preflightCache = $ctx.PreflightCache
+$preflightFailures = Invoke-LLPublishPreflightStage -Ctx $ctx -ReadyRoot $DraftsDir -DraftAssetRoot $DraftAssetRoot -Rows $selectionRows -Selection $(if ($SelectionFile) { $selection } else { $null }) -IncludePublished:$IncludePublished
 if ($preflightFailures.Count -gt 0) {
     $message = "발행 보안 사전검사 실패. 파일을 복사하거나 빌드·푸시하지 않았습니다: " + ($preflightFailures -join ' | ')
-    Write-PublishAttemptOutcome -Status 'needs_review' -FailureCode 'preflight_failed' -Message $message
+    Write-LLPublishAttemptOutcome -Ctx $ctx -Status 'needs_review' -FailureCode 'preflight_failed' -Message $message
     throw $message
 }
 
-# Hugo 입력 저장소의 기존 변경은 이번 선택본/참조 이미지 외에는 발행에 섞지 않는다.
-# public은 Hugo가 --cleanDestinationDir로 비우므로 시작 시 사용자 파일이 있으면 먼저 중단한다.
-$allowedSourcePaths = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
-foreach ($targetPlan in $targetPlans) {
-    $null = $allowedSourcePaths.Add("content/$($targetPlan.Section)/$($targetPlan.FileName)")
-    $processed = [string]$preflightCache[$targetPlan.Draft.FullName].Processed
-    foreach ($assetPath in (Get-DraftReferencedAssetPaths -Content $processed)) {
-        $null = $allowedSourcePaths.Add("static/$assetPath")
-    }
-}
-$null = $allowedSourcePaths.Add('public') # 별도 검사하는 public submodule의 gitlink만 허용
-$hugoInputPathspecs = @('content', 'static', 'assets', 'layouts', 'data', 'i18n', 'archetypes', 'config', 'themes', 'hugo.toml', 'hugo.yaml', 'hugo.json')
-$PublicDir = Join-Path $BlogSourceRoot 'public'
-try {
-    $null = Assert-LLPublishRepositoryReady `
-        -RepoRoot $BlogSourceRoot `
-        -AllowedWorkingPaths @($allowedSourcePaths | ForEach-Object { $_ }) `
-        -IgnoredPathspecs $hugoInputPathspecs `
-        -Label 'blog-source'
-    $null = Assert-LLPublishRepositoryReady `
-        -RepoRoot $PublicDir `
-        -AllowedWorkingPaths @() `
-        -IgnoredPathspecs @('.') `
-        -Label 'public'
-} catch {
-    $message = $_.Exception.Message
-    Write-Host ("  [ERROR] 발행 저장소 사전 확인 실패: {0}" -f $message) -ForegroundColor Red
-    Write-PublishAbortHint -FailureCode 'repository_not_ready' -Message $message
-    exit 1
-}
+# 복사 전에 저장소 상태와 모든 대상 경로를 먼저 검사한다.
+$hugoInputPathspecs = Get-LLHugoInputPathspecs
+$readiness = @(Assert-LLPublishTargetsReady -Ctx $ctx -BlogSourceRoot $BlogSourceRoot -DraftAssetRoot $DraftAssetRoot)[-1]
+if ($readiness.ExitCode -ne 0) { exit $readiness.ExitCode }
 
-# 모든 대상 경로를 먼저 검사해 충돌 하나 때문에 앞선 선택본만 복사되는 부분 발행을 막는다.
-$plannedDestinations = @{}
-try {
-foreach ($targetPlan in $targetPlans) {
-    $processed = [string]$preflightCache[$targetPlan.Draft.FullName].Processed
-    $null = Add-LLPublishDestinationPlanEntry `
-        -Plan $plannedDestinations `
-        -DestinationPath $targetPlan.DestPath `
-        -ExpectedContent $processed `
-        -Label '블로그 본문'
-    $null = Get-LLPublishDestinationDisposition `
-        -DestinationPath $targetPlan.DestPath `
-        -ExpectedContent $processed `
-        -AllowReplace:$targetPlan.IsUpdate `
-        -Label '블로그 본문'
-
-    foreach ($assetPath in (Get-DraftReferencedAssetPaths -Content $processed)) {
-        $relative = $assetPath -replace '/', '\'
-        $assetSource = Join-Path $DraftAssetRoot $relative
-        if (-not (Test-Path -LiteralPath $assetSource -PathType Leaf)) {
-            throw "초안 이미지 없음: /images/$assetPath"
-        }
-        $assetSourceFull = (Resolve-Path -LiteralPath $assetSource).Path
-        $assetRootFull = (Resolve-Path -LiteralPath $DraftAssetRoot).Path.TrimEnd('\') + '\'
-        if (-not $assetSourceFull.StartsWith($assetRootFull, [StringComparison]::OrdinalIgnoreCase)) {
-            throw "초안 이미지 저장소 밖의 경로: $assetPath"
-        }
-        $assetDestination = Join-Path (Join-Path $BlogSourceRoot 'static') $relative
-        $null = Add-LLPublishDestinationPlanEntry `
-            -Plan $plannedDestinations `
-            -DestinationPath $assetDestination `
-            -ExpectedFilePath $assetSourceFull `
-            -Label '블로그 이미지'
-        $null = Get-LLPublishDestinationDisposition `
-            -DestinationPath $assetDestination `
-            -ExpectedFilePath $assetSourceFull `
-            -Label '블로그 이미지'
-    }
-}
-} catch {
-    $message = $_.Exception.Message
-    Write-Host ("  [ERROR] 발행 대상 파일 확인 실패: {0}" -f $message) -ForegroundColor Red
-    Write-PublishAbortHint -FailureCode 'destination_preflight_failed' -Message $message
-    exit 1
-}
-
-foreach ($targetPlan in $targetPlans) {
-    $draft   = $targetPlan.Draft
-    $rel     = $targetPlan.Rel
-    $section = $targetPlan.Section
-    $fname   = $targetPlan.FileName
-
-    Write-Host ""
-    Write-Host ("  >> {0}" -f $rel) -ForegroundColor Magenta
-
-    # 대상 경로
-    $destDir  = $targetPlan.DestDir
-    $destPath = $targetPlan.DestPath
-
-    if (-not (Test-Path $destDir)) {
-        New-Item -ItemType Directory -Path $destDir -Force | Out-Null
-    }
-
-    try {
-        $preflightData = $preflightCache[$draft.FullName]
-        $raw = $preflightData.Raw
-        $sourceRow = $preflightData.SourceRow
-        if ($null -ne $sourceRow -and -not (Test-LLPublishableSource $sourceRow)) {
-            Write-Host ("     [SKIP] publish policy gate: {0}/{1}" -f $sourceRow.source_id, $sourceRow.public_policy) -ForegroundColor Yellow
-            $skippedPublishTargets.Add("$rel : publish policy gate")
-            continue
-        }
-        # front matter 처리 및 publish 직전 검수
-        $processed = $preflightData.Processed
-        $quality = Test-DraftQualityGate -DraftName $fname -RawContent $processed -SourceRow $sourceRow
-        if (-not $quality.Ok) {
-            Write-Host ("     [SKIP] quality gate: {0}" -f $quality.Reason) -ForegroundColor Yellow
-            $skippedPublishTargets.Add("$rel : $($quality.Reason)")
-            continue
-        }
-
-        $assetCount = Copy-DraftReferencedAssets -Content $processed -CreatedArtifacts $createdPublishArtifacts
-        if ($assetCount -gt 0) {
-            Write-Host ("     이미지: {0}개 -> blog-source\\static\\images" -f $assetCount) -ForegroundColor Green
-        }
-
-        $disposition = Get-LLPublishDestinationDisposition `
-            -DestinationPath $destPath `
-            -ExpectedContent $processed `
-            -AllowReplace:$targetPlan.IsUpdate `
-            -Label '블로그 본문'
-        if ($disposition -eq 'Create') {
-            $stream = [System.IO.File]::Open($destPath, [System.IO.FileMode]::CreateNew, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
-            try {
-                $writer = [System.IO.StreamWriter]::new($stream, [System.Text.Encoding]::UTF8)
-                try { $writer.Write($processed); $writer.Flush() } finally { $writer.Dispose() }
-            } finally {
-                if ($null -ne $stream) { $stream.Dispose() }
-            }
-            $createdPublishArtifacts.Add([pscustomobject]@{
-                full_path=$destPath; repo_path=("content/$section/$fname"); sha256=(Get-LLHash $destPath)
-            })
-            Write-Host ("     복사: {0}" -f $destPath.Replace($BlogSourceRoot, "blog-source")) -ForegroundColor Green
-        } elseif ($disposition -eq 'Replace') {
-            [System.IO.File]::WriteAllText($destPath, $processed, [System.Text.Encoding]::UTF8)
-            Write-Host ("     갱신: {0}" -f $destPath.Replace($BlogSourceRoot, "blog-source")) -ForegroundColor Green
-        } else {
-            Write-Host ("     기존 승인 내용 확인: {0}" -f $destPath.Replace($BlogSourceRoot, "blog-source")) -ForegroundColor DarkGray
-        }
-
-        # source_id가 없는 daily 합본은 파일명/topic 매칭으로 registry 업데이트
-        $sid = ""
-        $raw | Select-String "source_id:\s*(\S+)" | ForEach-Object {
-            $sid = $_.Matches[0].Groups[1].Value.Trim()
-        }
-        if (-not $sid -and $null -ne $sourceRow) {
-            $sid = Get-LLProp $sourceRow "source_id"
-        }
-
-        # 06_published 표식과 registry published 기록은 배포 성공 후로 미룬다.
-        # 여기서 바로 기록하면 빌드/푸시 실패 시 "발행됨"으로 오판되는 상태가 남는다.
-        $pendingRecords.Add([pscustomobject]@{
-            FileName  = $fname
-            Processed = $processed
-            SourceId  = $sid
-        })
-        $null = $sourcePathsToStage.Add("content/$section/$fname")
-        foreach ($assetPath in (Get-DraftReferencedAssetPaths -Content $processed)) {
-            $null = $sourcePathsToStage.Add("static/$assetPath")
-        }
-
-        $publishedCount++
-        if ($targetPlan.IsUpdate) { $publishedUpdateCount++ } else { $publishedNewCount++ }
-
-    } catch {
-        Write-Host ("     [ERROR] {0}" -f $_.Exception.Message) -ForegroundColor Red
-        $errors.Add($rel)
-    }
-}
+$copyResult = @(Invoke-LLPublishCopyStage -Ctx $ctx -BlogSourceRoot $BlogSourceRoot -DraftAssetRoot $DraftAssetRoot -SkippedTargets $skippedPublishTargets -Errors $errors -PendingRecords $pendingRecords -SourcePathsToStage $sourcePathsToStage)[-1]
+$publishedCount = $copyResult.Published
+$publishedNewCount = $copyResult.New
+$publishedUpdateCount = $copyResult.Updated
 
 if ($skippedPublishTargets.Count -gt 0) {
     $message = '선택한 승인본 중 일부가 발행 직전 정책 또는 품질 검사에서 제외되어 전체 작업을 중단했습니다: ' + ($skippedPublishTargets -join ' | ')
-    $cleanup = Move-CreatedPublishArtifactsToTrash -AttemptId $publishAttemptId
+    $cleanup = Move-LLPublishArtifactsToTrash -Ctx $ctx
     $cleanupPaths = @($cleanup.moved)
     if (@($cleanup.skipped).Count) { $message += ' · 정리 보류: ' + (@($cleanup.skipped) -join '; ') }
     Write-Host ("  [ERROR] {0}" -f $message) -ForegroundColor Red
-    Write-PublishAttemptOutcome -Status 'needs_review' -FailureCode 'target_skipped' -Message $message -CleanupPaths $cleanupPaths
+    Write-LLPublishAttemptOutcome -Ctx $ctx -Status 'needs_review' -FailureCode 'target_skipped' -Message $message -CleanupPaths $cleanupPaths
     Write-Host "  승인본은 보존했습니다. 검사 제외 원인을 확인하고 수정 후 다시 승인하세요." -ForegroundColor Yellow
     exit 1
 }
@@ -962,7 +334,7 @@ if ($skippedPublishTargets.Count -gt 0) {
 if ($errors.Count -gt 0) {
     $message = '일부 승인본을 준비하지 못해 부분 발행을 막았습니다: ' + ($errors -join ', ')
     Write-Host ("  [ERROR] {0}" -f $message) -ForegroundColor Red
-    Write-PublishAbortHint -FailureCode 'copy_failed' -Message $message
+    Write-LLPublishAbortHint -Ctx $ctx -FailureCode 'copy_failed' -Message $message
     exit 1
 }
 
@@ -971,214 +343,8 @@ if ($errors.Count -gt 0) {
 #   STRUCTURE.md 5장 순서 준수
 # ─────────────────────────────────────────────────────────
 if ($publishedCount -gt 0) {
-    $deployOk = $false
-    $PublicDir = Join-Path $BlogSourceRoot "public"
-
-    # hugo CLI 확인
-    $hugoCmd = Get-HugoCommandPath
-    if (-not $hugoCmd) {
-        Write-Host ""
-        Write-Host "  [ERROR] hugo 명령을 찾을 수 없습니다. Hugo 설치/PATH 확인 필요." -ForegroundColor Red
-        Write-Host "  글은 05_ready_to_publish → content 로 복사됐지만 라이브 배포는 건너뜁니다." -ForegroundColor Yellow
-        Write-Host "  수동 배포: STRUCTURE.md 5장 참고" -ForegroundColor DarkGray
-        Write-PublishAbortHint -FailureCode 'hugo_missing' -Message 'Hugo 실행 파일을 찾지 못했습니다.'
-        exit 1
-    } else {
-        # ── 1. Hugo 빌드 → public/ 에 HTML 생성 ──
-        Write-Host ""
-        Write-Host "  [1/3] Hugo 빌드 중..." -ForegroundColor Cyan
-        if ($NonInteractive) { Set-LLJobStage -Job publish -Index 2 -Total 4 -Key publish_build -Label '블로그 빌드' }
-        Push-Location $BlogSourceRoot
-        & $hugoCmd --cleanDestinationDir --logLevel warn
-        $hugoExit = $LASTEXITCODE
-        Pop-Location
-
-        if ($hugoExit -ne 0) {
-            Write-Host "  [ERROR] Hugo 빌드 실패 (exit $hugoExit). 배포 중단." -ForegroundColor Red
-            Write-PublishAbortHint -FailureCode 'hugo_build_failed' -Message "Hugo 빌드가 종료 코드 $hugoExit 로 실패했습니다."
-            exit $hugoExit
-        } else {
-            Write-Host "  Hugo 빌드 완료" -ForegroundColor Green
-
-            # hugo --cleanDestinationDir 가 public 서브모듈의 .git 포인터 파일을 지운다.
-            # 포인터가 없으면 public 안의 git 명령이 "unpopulated submodule"로 전부 실패하므로
-            # 빌드 직후 반드시 복원한다. (2026-07-20 발행 불능 사건)
-            $publicGitPointer = Join-Path $PublicDir ".git"
-            if (-not (Test-Path -LiteralPath $publicGitPointer)) {
-                Set-Content -LiteralPath $publicGitPointer -Value 'gitdir: ../.git/modules/public' -NoNewline -Encoding ascii
-                Write-Host "  public\.git 포인터 복원됨 (cleanDestinationDir 삭제 대응)" -ForegroundColor DarkGray
-            }
-
-            # Hugo 실행 중 다른 입력/산출물이 섞였거나 기존 stage가 생기면 라이브 푸시 전에 차단한다.
-            $allowedBlogStagePaths = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
-            foreach ($sourcePath in $sourcePathsToStage) { $null = $allowedBlogStagePaths.Add($sourcePath) }
-            $null = $allowedBlogStagePaths.Add('public')
-            try {
-                $null = Assert-LLPublishRepositoryReady `
-                    -RepoRoot $BlogSourceRoot `
-                    -AllowedWorkingPaths @($allowedBlogStagePaths | ForEach-Object { $_ }) `
-                    -IgnoredPathspecs $hugoInputPathspecs `
-                    -Label 'blog-source'
-                $publicState = Get-LLPublishGitState -RepoRoot $PublicDir -IgnoredPathspecs @('.')
-                if (@($publicState.staged_paths).Count -gt 0) {
-                    throw "public 저장소에 stage 변경이 있어 발행을 중단합니다: $(Format-LLPublishPaths $publicState.staged_paths)"
-                }
-                if (@($publicState.ignored_paths).Count -gt 0) {
-                    throw "public 저장소에 무시된 빌드 파일이 있어 발행을 중단합니다: $(Format-LLPublishPaths $publicState.ignored_paths)"
-                }
-                $publicPaths = @($publicState.working_paths)
-                $protectedPublicPaths = @($publicPaths | Where-Object { $_ -match '(^|/)\.git(?:ignore|modules|attributes)$|(^|/)\.github(?:/|$)' })
-                if ($protectedPublicPaths.Count -gt 0) {
-                    throw "Hugo 산출물에 Git 운영 파일이 포함되어 발행을 중단합니다: $(Format-LLPublishPaths $protectedPublicPaths)"
-                }
-            } catch {
-                Write-Host ("  [ERROR] Git 발행 경계 검사 실패: {0}" -f $_.Exception.Message) -ForegroundColor Red
-                Write-PublishAbortHint -FailureCode 'git_boundary_failed' -Message $_.Exception.Message
-                exit 1
-            }
-
-            # ── 2. 라이브 사이트(public submodule) 먼저 푸시 ──
-            Write-Host "  [2/3] 라이브 사이트(public) 푸시 중..." -ForegroundColor Cyan
-            if ($NonInteractive) { Set-LLJobStage -Job publish -Index 3 -Total 4 -Key publish_live -Label '라이브 배포' }
-            if ($publicPaths.Count -gt 0) {
-                try {
-                    $script:PublicStageAttempted = $true
-                    $null = Add-LLPublishPathsToIndex -RepoRoot $PublicDir -Paths $publicPaths
-                } catch {
-                    Write-Host ("  [ERROR] public 허용 파일 stage 실패: {0}" -f $_.Exception.Message) -ForegroundColor Red
-                    Write-PublishAbortHint -FailureCode 'public_stage_failed' -Message $_.Exception.Message
-                    exit 1
-                }
-            }
-            try {
-                $null = Assert-LLPublishStagedPathsAllowed -RepoRoot $PublicDir -AllowedPaths $publicPaths -Label 'public'
-            } catch {
-                Write-Host ("  [ERROR] public stage 경계 검사 실패: {0}" -f $_.Exception.Message) -ForegroundColor Red
-                Write-PublishAbortHint -FailureCode 'public_stage_boundary_failed' -Message $_.Exception.Message
-                exit 1
-            }
-            git -C $PublicDir diff --cached --quiet
-            $pubDiffExit = $LASTEXITCODE
-            if ($pubDiffExit -gt 1) {
-                Write-Host "  [ERROR] public stage 상태 확인 실패" -ForegroundColor Red
-                Write-PublishAbortHint -FailureCode 'public_stage_status_failed' -Message "git diff --cached 종료 코드 $pubDiffExit"
-                exit $pubDiffExit
-            }
-            $pubHasNoStagedChanges = ($pubDiffExit -eq 0)
-            if ($pubHasNoStagedChanges) {
-                Write-Host "  public 커밋할 변경 없음" -ForegroundColor DarkGray
-            } else {
-                try {
-                    $null = Assert-LLPublishStagedPathsAllowed -RepoRoot $PublicDir -AllowedPaths $publicPaths -Label 'public'
-                } catch {
-                    Write-Host ("  [ERROR] public 커밋 직전 stage 경계 검사 실패: {0}" -f $_.Exception.Message) -ForegroundColor Red
-                    Write-PublishAbortHint -FailureCode 'public_precommit_boundary_failed' -Message $_.Exception.Message
-                    exit 1
-                }
-                $script:PublicCommitAttempted = $true
-                git -C $PublicDir commit -m "LearningLog publish: $publishedCount posts ($TodayStr)" 2>&1 | Out-Host
-                $pubCommit = $LASTEXITCODE
-                if ($pubCommit -ne 0) {
-                    Write-Host "  [ERROR] public 커밋 실패" -ForegroundColor Red
-                    Write-PublishAbortHint -FailureCode 'public_commit_failed' -Message "public git commit 종료 코드 $pubCommit"
-                    exit $pubCommit
-                }
-                $script:PublicCommitCompleted = $true
-            }
-            # 서브모듈은 detached HEAD 로 체크아웃되므로 로컬 main 이 안 움직인다.
-            # HEAD:main 으로 밀어야 현재 커밋이 실제 라이브(origin/main)에 반영된다.
-            $script:PublicPushAttempted = $true
-            git -C $PublicDir push origin HEAD:main
-            $pubPush = $LASTEXITCODE
-            if ($pubPush -eq 0) { $script:LivePushCompleted = $true; Write-Host "  라이브 사이트 푸시 완료" -ForegroundColor Green }
-            else {
-                Write-Host "  [ERROR] public 푸시 실패" -ForegroundColor Red
-                Write-PublishAbortHint -FailureCode 'public_push_uncertain' -Message "public push 종료 코드 $pubPush. 원격 반영 여부를 대조해야 합니다."
-                exit $pubPush
-            }
-
-            # ── 3. 소스 백업 푸시 ──
-            Write-Host "  [3/3] 소스(blog-source) 백업 푸시 중..." -ForegroundColor Cyan
-            if ($NonInteractive) { Set-LLJobStage -Job publish -Index 4 -Total 4 -Key publish_record -Label '소스 백업·발행 기록' }
-            $sourceStagePaths = @($sourcePathsToStage | ForEach-Object { $_ }) + @('public') | Select-Object -Unique
-            try {
-                $null = Assert-LLPublishRepositoryReady `
-                    -RepoRoot $BlogSourceRoot `
-                    -AllowedWorkingPaths $sourceStagePaths `
-                    -IgnoredPathspecs $hugoInputPathspecs `
-                    -Label 'blog-source'
-                $null = Add-LLPublishPathsToIndex -RepoRoot $BlogSourceRoot -Paths $sourceStagePaths
-                $null = Assert-LLPublishStagedPathsAllowed -RepoRoot $BlogSourceRoot -AllowedPaths $sourceStagePaths -Label 'blog-source'
-            } catch {
-                Write-Host ("  [ERROR] blog-source stage 경계 검사 실패: {0}" -f $_.Exception.Message) -ForegroundColor Red
-                Write-PublishAbortHint -FailureCode 'source_stage_boundary_failed' -Message $_.Exception.Message
-                exit 1
-            }
-            git -C $BlogSourceRoot diff --cached --quiet
-            $sourceDiffExit = $LASTEXITCODE
-            if ($sourceDiffExit -gt 1) {
-                Write-Host "  [ERROR] blog-source stage 상태 확인 실패" -ForegroundColor Red
-                Write-PublishAbortHint -FailureCode 'source_stage_status_failed' -Message "blog-source git diff --cached 종료 코드 $sourceDiffExit"
-                exit $sourceDiffExit
-            }
-            $sourceHasNoStagedChanges = ($sourceDiffExit -eq 0)
-            if ($sourceHasNoStagedChanges) {
-                Write-Host "  blog-source 커밋할 변경 없음" -ForegroundColor DarkGray
-            } else {
-                try {
-                    $null = Assert-LLPublishStagedPathsAllowed -RepoRoot $BlogSourceRoot -AllowedPaths $sourceStagePaths -Label 'blog-source'
-                } catch {
-                    Write-Host ("  [ERROR] blog-source 커밋 직전 stage 경계 검사 실패: {0}" -f $_.Exception.Message) -ForegroundColor Red
-                    Write-PublishAbortHint -FailureCode 'source_precommit_boundary_failed' -Message $_.Exception.Message
-                    exit 1
-                }
-                git -C $BlogSourceRoot commit -m "LearningLog source: $publishedCount posts ($TodayStr)" 2>&1 | Out-Host
-                $sourceCommit = $LASTEXITCODE
-                if ($sourceCommit -ne 0) {
-                    Write-Host "  [ERROR] blog-source 커밋 실패" -ForegroundColor Red
-                    Write-PublishAbortHint -FailureCode 'source_commit_failed_after_live_push' -Message "라이브 공개는 성공했지만 blog-source 커밋이 종료 코드 $sourceCommit 로 실패했습니다."
-                    exit $sourceCommit
-                }
-            }
-            git -C $BlogSourceRoot push
-            $sourcePush = $LASTEXITCODE
-            if ($sourcePush -ne 0) {
-                Write-Host "  [ERROR] blog-source 푸시 실패" -ForegroundColor Red
-                Write-PublishAbortHint -FailureCode 'source_push_failed_after_live_push' -Message "라이브 공개는 성공했지만 blog-source push가 종료 코드 $sourcePush 로 실패했습니다."
-                exit $sourcePush
-            }
-            Write-Host "  소스 백업 완료" -ForegroundColor Green
-            $deployOk = $true
-
-            # 두 push가 성공한 뒤 published 파일, registry, 발행 원장을 각각 기록한다.
-            # 어느 한 로컬 기록이 실패해도 나머지 성공 표식이 중복 재발행을 막는다.
-            $publicationRecordErrors = [System.Collections.Generic.List[string]]::new()
-            if (-not (Test-Path -LiteralPath $PublishedDir)) {
-                try { New-Item -ItemType Directory -Path $PublishedDir -Force | Out-Null }
-                catch { $publicationRecordErrors.Add("06_published 폴더 생성 실패: $($_.Exception.Message)") }
-            }
-            foreach ($rec in $pendingRecords) {
-                try { [System.IO.File]::WriteAllText((Join-Path $PublishedDir $rec.FileName), $rec.Processed, [System.Text.Encoding]::UTF8) }
-                catch { $publicationRecordErrors.Add("06_published 기록 실패($($rec.FileName)): $($_.Exception.Message)") }
-                if ($rec.SourceId) {
-                    try { _UpdateRegistry $rec.SourceId }
-                    catch { $publicationRecordErrors.Add("registry 발행 상태 기록 실패($($rec.SourceId)): $($_.Exception.Message)") }
-                }
-            }
-            try { Write-PublishAttemptOutcome -Status 'published' -PublishedDate $TodayStr -Message '라이브 사이트와 blog-source 백업 push가 모두 성공했습니다.' }
-            catch { $publicationRecordErrors.Add("publish_ledger 기록 실패: $($_.Exception.Message)") }
-            if ($publicationRecordErrors.Count -eq 0) {
-                Write-Host ("  발행 기록 완료: 06_published {0}건 + registry + publish_ledger" -f $pendingRecords.Count) -ForegroundColor Green
-            } else {
-                $publicationRecordMessage = '라이브와 blog-source push는 성공했으나 로컬 발행 기록을 모두 완료하지 못했습니다. 중복 방지를 위해 남은 기록을 확인하세요: ' + ($publicationRecordErrors -join ' | ')
-                $errors.Add($publicationRecordMessage)
-                Write-Host ("  [WARN] {0}" -f $publicationRecordMessage) -ForegroundColor Yellow
-            }
-
-            Write-Host ""
-            Write-Host "  배포 완료! https://<your-id>.github.io/ 확인" -ForegroundColor Green
-        }
-    }
+    $deployResult = @(Invoke-LLPublishDeploy -Ctx $ctx -BlogSourceRoot $BlogSourceRoot -PublishedDir $PublishedDir -SourcePathsToStage $sourcePathsToStage -HugoInputPathspecs $hugoInputPathspecs -PendingRecords $pendingRecords -Errors $errors -PublishedCount $publishedCount -TodayStr $TodayStr -SiteUrlHint 'https://<your-id>.github.io/' -NonInteractive:$NonInteractive)[-1]
+    if ($deployResult.ExitCode -ne 0) { exit $deployResult.ExitCode }
 }
 
 # ─────────────────────────────────────────────────────────

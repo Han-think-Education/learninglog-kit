@@ -1,15 +1,15 @@
 ﻿#Requires -Version 7.0
 <#
 .SYNOPSIS
-    LearningLog Phase 3 Extract — Ollama 호출로 extract + working_note 자동 생성
+    LearningLog Phase 3 Extract — LM Studio 호출로 extract + working_note 자동 생성
 
 .DESCRIPTION
     하는 것:
-      - Ollama 헬스체크 (127.0.0.1:11434)
+      - LM Studio 헬스체크 + 로드된 모델 확인 (127.0.0.1:1234)
       - 09_reports\llm_prep\PREP_*.md 패킷 로드 및 파싱
-      - MODE 1 classify  : exaone3.5:7.8b     → classify_SOURCEID.json
-      - MODE 2 extract   : exaone3.5:7.8b     → 02_extracted\concept_extracts\
-      - MODE 3 working_note: exaone3.5:7.8b   → 03_working_notes\daily_logs\
+      - MODE 1 classify  : -LMStudioModel     → classify_SOURCEID.json
+      - MODE 2 extract   : -LMStudioModel     → 02_extracted\concept_extracts\
+      - MODE 3 working_note: -LMStudioModel   → 03_working_notes\daily_logs\
       - source_registry.csv status 업데이트 (registered → extracted → working)
       - 처리 완료 패킷 → 09_reports\llm_prep\processed\ 이동
       - 실행 리포트 → 09_reports\extract_report_YYYYMMDD_HHMMSS.md
@@ -43,7 +43,7 @@ param(
     [string]$SourceId      = "",
     [int]$NumCtx           = 8192,  # 실행 컨텍스트. GPU VRAM 부족 시 4096/2048 로 낮춤
     [int]$MaxCharsPerChunk = 0,     # 0 = NumCtx 에서 자동 계산
-    [ValidateSet("lm","ollama")]
+    [ValidateSet("lm")]   # 호환용(LM Studio 단일 엔진). 호출부의 -Engine lm 이 깨지지 않게 남겨 둔다.
     [string]$Engine         = "lm",
     [string]$LMStudioBase   = "http://127.0.0.1:1234",
     [string]$LMStudioModel  = "local-model",
@@ -53,6 +53,7 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 Import-Module (Join-Path $PSScriptRoot "core\LearningLog.LocalCore.psm1") -Force -DisableNameChecking
+Import-Module (Join-Path $PSScriptRoot "core\LearningLog.Llm.psm1") -Force -DisableNameChecking
 
 # ─────────────────────────────────────────────────────────
 # 경로 설정
@@ -65,8 +66,6 @@ $ReportsDir   = Get-LLPath "09_reports"
 $BackupDir    = Get-LLPath "07_archive\backups"
 $ExtractedDir = Get-LLPath "02_extracted\concept_extracts"
 $WorkingDir   = Get-LLPath "03_working_notes\daily_logs"
-$OllamaBase   = "http://127.0.0.1:11434"
-$UseLM        = $Engine -ieq "lm"
 
 $RunDT     = Get-Date
 $RunTime   = $RunDT.ToString("yyyy-MM-dd HH:mm:ss")
@@ -76,9 +75,9 @@ $TimeStamp = $RunDT.ToString("yyyyMMdd_HHmmss")
 # ─────────────────────────────────────────────────────────
 # 모델 설정
 # ─────────────────────────────────────────────────────────
-$ModelClassify = if ($UseLM) { $LMStudioModel } else { "exaone3.5:7.8b" }
-$ModelExtract  = if ($UseLM) { $LMStudioModel } else { "exaone3.5:7.8b" }
-$ModelWorking  = if ($UseLM) { $LMStudioModel } else { "exaone3.5:7.8b" }
+$ModelClassify = $LMStudioModel
+$ModelExtract  = $LMStudioModel
+$ModelWorking  = $LMStudioModel
 
 # ─────────────────────────────────────────────────────────
 # 배너
@@ -93,31 +92,21 @@ Write-Host "========================================" -ForegroundColor Cyan
 # 1. LLM 엔드포인트 헬스체크
 # ─────────────────────────────────────────────────────────
 Write-Host ""
-Write-Host ("  {0} 헬스체크 ... " -f $(if ($UseLM) { "LM Studio" } else { "Ollama" })) -ForegroundColor White -NoNewline
+Write-Host "  LM Studio 헬스체크 ... " -ForegroundColor White -NoNewline
 try {
-    if ($UseLM) {
-        $null = Invoke-RestMethod -Uri "$LMStudioBase/v1/models" -Method Get -TimeoutSec 5 -ErrorAction Stop
-        Write-Host "OK ($LMStudioBase)" -ForegroundColor Green
-        # 생성 전에 모델 ID가 실제 로드 목록에 있는지 확인 — 잘못된 ID면 긴 재시도 대신 즉시 실패.
-        $mc = Test-LLMModelAvailable -Model $LMStudioModel -LMStudioBase $LMStudioBase
-        if (-not $mc.ok) {
-            Write-Host ("  [ERROR] 모델 '{0}' 이(가) LM Studio에 로드돼 있지 않습니다. Load 후 다시 실행하세요." -f $LMStudioModel) -ForegroundColor Red
-            if ($mc.available.Count -gt 0) { Write-Host ("  현재 로드됨: {0}" -f ($mc.available -join ", ")) -ForegroundColor DarkGray }
-            exit 1
-        }
-        Write-Host ("  모델 확인: {0}" -f $LMStudioModel) -ForegroundColor Green
-    } else {
-        $null = Invoke-RestMethod -Uri "$OllamaBase/" -Method Get -TimeoutSec 5 -ErrorAction Stop
-        Write-Host "OK ($OllamaBase)" -ForegroundColor Green
+    $null = Invoke-RestMethod -Uri "$LMStudioBase/v1/models" -Method Get -TimeoutSec 5 -ErrorAction Stop
+    Write-Host "OK ($LMStudioBase)" -ForegroundColor Green
+    # 생성 전에 모델 ID가 실제 로드 목록에 있는지 확인 — 잘못된 ID면 긴 재시도 대신 즉시 실패.
+    $mc = Test-LLMModelAvailable -Model $LMStudioModel -LMStudioBase $LMStudioBase
+    if (-not $mc.ok) {
+        Write-Host ("  [ERROR] 모델 '{0}' 이(가) LM Studio에 로드돼 있지 않습니다. Load 후 다시 실행하세요." -f $LMStudioModel) -ForegroundColor Red
+        if ($mc.available.Count -gt 0) { Write-Host ("  현재 로드됨: {0}" -f ($mc.available -join ", ")) -ForegroundColor DarkGray }
+        exit 1
     }
+    Write-Host ("  모델 확인: {0}" -f $LMStudioModel) -ForegroundColor Green
 } catch {
     Write-Host "FAIL" -ForegroundColor Red
-    if ($UseLM) {
-        Write-Host "  [ERROR] LM Studio 서버가 없습니다. 127.0.0.1:1234에서 서버를 켜고 모델을 로드하세요." -ForegroundColor Red
-    } else {
-        Write-Host "  [ERROR] Ollama 미실행. $OllamaBase 를 먼저 시작하세요." -ForegroundColor Red
-        Write-Host "  힌트: ollama serve 또는 Ollama 앱 실행" -ForegroundColor Yellow
-    }
+    Write-Host "  [ERROR] LM Studio 서버가 없습니다. 127.0.0.1:1234에서 서버를 켜고 모델을 로드하세요." -ForegroundColor Red
     exit 1
 }
 
@@ -170,69 +159,9 @@ foreach ($d in @($ProcessedDir, $ExtractedDir, $WorkingDir)) {
 # ─────────────────────────────────────────────────────────
 # 헬퍼: LM Studio/OpenAI 호환 생성 호출
 # ─────────────────────────────────────────────────────────
-function Invoke-LMStudioGenerate {
-    param(
-        [string]$Model,
-        [string]$Prompt,
-        [int]$NumPredict = 512,
-        [int]$CtxSize    = 8192
-    )
-    $bodyObj = [ordered]@{
-        model = $Model
-        messages = @(
-            [ordered]@{ role = "user"; content = $Prompt }
-        )
-        stream = $false
-        temperature = 0.2
-        max_tokens = $NumPredict
-    }
-    $bodyJson = $bodyObj | ConvertTo-Json -Depth 6 -Compress
-    $bytes = [Text.Encoding]::UTF8.GetBytes($bodyJson)
-    # 일시적 blip(순간 400/타임아웃/빈응답) 흡수용 재시도. 지속 실패는 그대로 throw.
-    $maxAttempts = 3
-    for ($attempt = 1; $attempt -le $maxAttempts; $attempt++) {
-        try {
-            $resp = Invoke-RestMethod -Uri "$LMStudioBase/v1/chat/completions" -Method Post `
-                -Body $bytes -ContentType "application/json; charset=utf-8" -TimeoutSec 600 -ErrorAction Stop
-            $text = [string]$resp.choices[0].message.content
-            if ([string]::IsNullOrWhiteSpace($text)) { throw "LM Studio returned an empty response." }
-            return $text
-        } catch {
-            if ($attempt -ge $maxAttempts) { throw }
-            Write-Host ("      [LM 재시도 {0}/{1}] {2}" -f $attempt, $maxAttempts, $_.Exception.Message) -ForegroundColor DarkYellow
-            Start-Sleep -Seconds ($attempt * 2)
-        }
-    }
-}
-
-function Invoke-OllamaGenerate {
-    param(
-        [string]$Model,
-        [string]$Prompt,
-        [int]$NumPredict = 512,   # 출력 토큰 제한 — 입력 여유 확보
-        [int]$CtxSize    = 8192   # Ollama 실행 컨텍스트 명시 (스크립트 $NumCtx 와 일치)
-    )
-    if ($UseLM) {
-        return Invoke-LMStudioGenerate -Model $Model -Prompt $Prompt -NumPredict $NumPredict -CtxSize $CtxSize
-    }
-    $bodyObj = [ordered]@{
-        model   = $Model
-        prompt  = $Prompt
-        stream  = $false
-        options = [ordered]@{ num_predict = $NumPredict; num_ctx = $CtxSize }
-    }
-    $bodyJson  = $bodyObj | ConvertTo-Json -Depth 4 -Compress
-    $bodyBytes = [System.Text.Encoding]::UTF8.GetBytes($bodyJson)
-
-    $resp = Invoke-RestMethod `
-        -Uri "$OllamaBase/api/generate" `
-        -Method Post `
-        -Body $bodyBytes `
-        -ContentType "application/json; charset=utf-8" `
-        -TimeoutSec 600 `
-        -ErrorAction Stop
-
-    return $resp.response
+function Invoke-LLMText {
+    param([string]$Model, [string]$Prompt, [int]$NumPredict = 512)
+    return Invoke-LLMGenerate -Base $LMStudioBase -Model $Model -Prompt $Prompt -NumPredict $NumPredict -Temperature 0.2
 }
 
 # ─────────────────────────────────────────────────────────
@@ -251,64 +180,10 @@ function Get-ChunkSize {
 # ─────────────────────────────────────────────────────────
 # 헬퍼: 텍스트 청킹 (단락 단위)
 # ─────────────────────────────────────────────────────────
-function Split-IntoChunks {
-    param(
-        [string]$Text,
-        [int]$MaxChars,
-        [int]$OverlapChars = 0
-    )
-    # 빈 줄 기준으로 단락 분리
-    $paragraphs = $Text -split "(?m)^\s*$"
-    $chunks = [System.Collections.Generic.List[string]]::new()
-    $current = [System.Text.StringBuilder]::new()
-
-    foreach ($para in $paragraphs) {
-        $para = $para.Trim()
-        if ($para -eq "") { continue }
-
-        if ($current.Length + $para.Length + 2 -gt $MaxChars -and $current.Length -gt 0) {
-            $chunks.Add($current.ToString().Trim())
-            $null = $current.Clear()
-        }
-        $null = $current.AppendLine($para)
-        $null = $current.AppendLine()
-    }
-    if ($current.Length -gt 0) { $chunks.Add($current.ToString().Trim()) }
-
-    # 단락 자체가 MaxChars 초과하는 경우 강제 분할
-    $result = [System.Collections.Generic.List[string]]::new()
-    foreach ($chunk in $chunks) {
-        if ($chunk.Length -le $MaxChars) {
-            $result.Add($chunk)
-        } else {
-            $pos = 0
-            while ($pos -lt $chunk.Length) {
-                $len = [Math]::Min($MaxChars, $chunk.Length - $pos)
-                $result.Add($chunk.Substring($pos, $len))
-                $pos += $len
-            }
-        }
-    }
-    if ($OverlapChars -le 0 -or $result.Count -le 1) { return $result }
-
-    $withOverlap = [System.Collections.Generic.List[string]]::new()
-    for ($i = 0; $i -lt $result.Count; $i++) {
-        if ($i -eq 0) {
-            $withOverlap.Add($result[$i])
-            continue
-        }
-        $prev = $result[$i - 1]
-        $tailLen = [Math]::Min($OverlapChars, $prev.Length)
-        $tail = $prev.Substring($prev.Length - $tailLen)
-        $withOverlap.Add("[이전 문맥 일부]`n$tail`n`n[현재 파트]`n$($result[$i])")
-    }
-    return $withOverlap
-}
-
 # ─────────────────────────────────────────────────────────
 # 헬퍼: 청킹 + 병합 LLM 호출
 # ─────────────────────────────────────────────────────────
-function Invoke-OllamaChunked {
+function Invoke-LLMTextChunked {
     param(
         [string]$Model,
         [string]$Instruction,   # 고정 지시문 (프롬프트 템플릿)
@@ -320,10 +195,10 @@ function Invoke-OllamaChunked {
 
     # 청킹 불필요한 경우 바로 처리
     if (($DirectChars -gt 0 -and $Body.Length -le $DirectChars) -or $Body.Length -le $MaxChars) {
-        return Invoke-OllamaGenerate -Model $Model -Prompt ($Instruction + "`n---`n" + $Body) -CtxSize $NumCtx
+        return Invoke-LLMText -Model $Model -Prompt ($Instruction + "`n---`n" + $Body)
     }
 
-    $chunks = Split-IntoChunks -Text $Body -MaxChars $MaxChars -OverlapChars $OverlapChars
+    $chunks = Split-LLTextChunks -Text $Body -MaxChars $MaxChars -OverlapChars $OverlapChars
     Write-Host ("      청킹: {0} 파트 분할 (각 ~{1}자, overlap {2}자)" -f $chunks.Count, $MaxChars, $OverlapChars) -ForegroundColor DarkGray
 
     # 각 청크 처리
@@ -332,7 +207,7 @@ function Invoke-OllamaChunked {
         $chunkInstruction = $Instruction + "`n(파트 $($i+1)/$($chunks.Count) — 이 부분만 처리)"
         Set-LLJobItem -Detail ("{0} · 파트 {1}/{2}" -f $script:LHStepLabel, ($i + 1), $chunks.Count)
         Write-Host ("      파트 $($i+1)/$($chunks.Count) " ) -ForegroundColor DarkGray -NoNewline
-        $partial = Invoke-OllamaGenerate -Model $Model -Prompt ($chunkInstruction + "`n---`n" + $chunks[$i]) -CtxSize $NumCtx
+        $partial = Invoke-LLMText -Model $Model -Prompt ($chunkInstruction + "`n---`n" + $chunks[$i])
         $partials.Add($partial)
         Write-Host "OK" -ForegroundColor Green
     }
@@ -352,53 +227,9 @@ function Invoke-OllamaChunked {
     return $merged.ToString().Trim()
 }
 
-function Remove-ExtraHugoFrontMatter {
-    param([string]$Text)
-    $lines = $Text -split "`r?`n"
-    if ($lines.Count -eq 0) { return $Text }
-
-    $start = 0
-    if ($lines[0].Trim() -eq "---") {
-        for ($i = 1; $i -lt $lines.Count; $i++) {
-            if ($lines[$i].Trim() -eq "---") {
-                $start = $i + 1
-                break
-            }
-        }
-    }
-
-    $out = [System.Collections.Generic.List[string]]::new()
-    for ($i = 0; $i -lt $start; $i++) { $out.Add($lines[$i]) }
-
-    $metaLinePattern = '^\s*(source_id|note_date|mode|model):\s*'
-    $boldMetaPattern = '^\s*\*\*(title|제목|date|날짜|draft|categories|category|카테고리|범주|tags|태그|description|설명)\*\*\s*:'
-
-    $i = $start
-    while ($i -lt $lines.Count) {
-        $line = $lines[$i]
-        if ($line.Trim() -eq "---" -or $line -match $metaLinePattern -or $line -match $boldMetaPattern) {
-            $i++
-            continue
-        }
-
-        $out.Add($line)
-        $i++
-    }
-
-    return (($out -join "`n").TrimEnd() + "`n")
-}
-
 # ─────────────────────────────────────────────────────────
 # 헬퍼: registry status 업데이트
 # ─────────────────────────────────────────────────────────
-function Update-RegistryStatus {
-    param(
-        [string]$Sid,
-        [string]$NewStatus
-    )
-    return (Set-LLRegistryStatus -SourceId $Sid -Status $NewStatus)
-}
-
 # ─────────────────────────────────────────────────────────
 # 4. 기본 청크 정책 표시
 # ─────────────────────────────────────────────────────────
@@ -515,7 +346,7 @@ foreach ($pkt in $packets) {
             $classifyPrompt = "너는 LearningLog 파이프라인의 소스 분류 워커다.`n" +
                               "아래 노트를 읽고 다음 JSON 형식으로만 출력해라. JSON 외 다른 텍스트는 절대 쓰지 마라.`n" +
                               $jsonTemplate + "`n---`n" + $classifyBody
-            $classifyResult = Invoke-OllamaGenerate -Model $ModelClassify -Prompt $classifyPrompt -NumPredict 200 -CtxSize $NumCtx
+            $classifyResult = Invoke-LLMText -Model $ModelClassify -Prompt $classifyPrompt -NumPredict 200
             [System.IO.File]::WriteAllText($classifyPath, $classifyResult, [System.Text.Encoding]::UTF8)
             Write-Host "OK" -ForegroundColor Green
         } catch {
@@ -535,12 +366,12 @@ foreach ($pkt in $packets) {
             $extractInstruction = "너는 LearningLog 파이프라인의 사실 추출 워커다.`n" +
                                   "아래 학습 노트에서 핵심 사실만 추출해라. 개인 해석은 포함하지 마라. 한국어로 작성해라.`n" +
                                   "출력 형식:`n# Extracted Summary`n## 핵심 개념`n## 명령어 / 코드`n## 기억할 사실"
-            $extractResult = Invoke-OllamaChunked -Model $ModelExtract -Instruction $extractInstruction -Body $body -MaxChars $ChunkExtract -DirectChars $DirectChars -OverlapChars $OverlapChars
+            $extractResult = Invoke-LLMTextChunked -Model $ModelExtract -Instruction $extractInstruction -Body $body -MaxChars $ChunkExtract -DirectChars $DirectChars -OverlapChars $OverlapChars
 
             $extractFM = "---`nsource_id: $sid`nextract_date: $TodayStr`nmodel: $ModelExtract`nmode: extract`n---`n`n"
             [System.IO.File]::WriteAllText($extractPath, ($extractFM + $extractResult), [System.Text.Encoding]::UTF8)
 
-            $null = Update-RegistryStatus -Sid $sid -NewStatus "extracted"
+            $null = Set-LLRegistryStatus -SourceId $sid -Status "extracted"
             Write-Host "OK" -ForegroundColor Green
             Write-Host "    registry         ... registered → extracted" -ForegroundColor DarkGray
         } catch {
@@ -561,12 +392,12 @@ foreach ($pkt in $packets) {
                                   "아래 학습 노트를 바탕으로 한국어 워킹 노트를 작성해라.`n" +
                                   "초보자 시점, 학습자의 혼란을 중심으로 써라.`n" +
                                   "포함 항목: 무엇이 헷갈렸나 / 정리된 이해 / 실습 예시 / 초보자 키워드(의미+검색어) / 내 프로젝트 연결 / 다음 복습 주제"
-            $workingResult = Invoke-OllamaChunked -Model $ModelWorking -Instruction $workingInstruction -Body $body -MaxChars $ChunkWorking -DirectChars $DirectChars -OverlapChars $OverlapChars
+            $workingResult = Invoke-LLMTextChunked -Model $ModelWorking -Instruction $workingInstruction -Body $body -MaxChars $ChunkWorking -DirectChars $DirectChars -OverlapChars $OverlapChars
 
             $workingFM = "---`nsource_id: $sid`nnote_date: $noteDate`nmodel: $ModelWorking`nmode: working_note`n---`n`n"
             [System.IO.File]::WriteAllText($workingPath, ($workingFM + $workingResult), [System.Text.Encoding]::UTF8)
 
-            $null = Update-RegistryStatus -Sid $sid -NewStatus "working"
+            $null = Set-LLRegistryStatus -SourceId $sid -Status "working"
             Write-Host "OK" -ForegroundColor Green
             Write-Host "    registry         ... extracted → working" -ForegroundColor DarkGray
         } catch {
@@ -636,19 +467,19 @@ foreach ($pkt in $packets) {
                     "## 2. 두 번째 개념명`n(같은 ### 다섯 블록 반복)`n`n" +
                     "## 총평`n### 오늘 전체에서 배운 것`n...`n### 다음에 조심할 것`n...`n### 다음 복습 주제`n..."
 
-                $draftResult = Invoke-OllamaChunked -Model $ModelWorking -Instruction $draftInstruction -Body $wContent -MaxChars $ChunkWorking -DirectChars $DirectChars -OverlapChars $OverlapChars
-                $draftResult = Remove-ExtraHugoFrontMatter -Text $draftResult
+                $draftResult = Invoke-LLMTextChunked -Model $ModelWorking -Instruction $draftInstruction -Body $wContent -MaxChars $ChunkWorking -DirectChars $DirectChars -OverlapChars $OverlapChars
+                $draftResult = Remove-ExtraHugoFrontMatter -Text $draftResult -KeepTrailingWhitespace
                 $draftResult = ConvertTo-LLOutlineArticleStructure -Content $draftResult
                 [System.IO.File]::WriteAllText($draftPath, $draftResult, [System.Text.Encoding]::UTF8)
 
                 $draftIssues = @(Get-LLDraftQualityIssues -Content $draftResult)
                 if ($draftIssues.Count -gt 0) {
-                    $null = Update-RegistryStatus -Sid $sid -NewStatus "needs_review"
+                    $null = Set-LLRegistryStatus -SourceId $sid -Status "needs_review"
                     Write-Host ("WARN ({0})" -f ($draftIssues -join ", ")) -ForegroundColor Yellow
                     Write-Host ("    draft 저장       ... 04_blog_drafts\{0}\{1}.md" -f $section, $topic) -ForegroundColor DarkGray
                     Write-Host "    registry         ... working → needs_review" -ForegroundColor Yellow
                 } else {
-                    $null = Update-RegistryStatus -Sid $sid -NewStatus "drafted"
+                    $null = Set-LLRegistryStatus -SourceId $sid -Status "drafted"
                     Write-Host "OK" -ForegroundColor Green
                     Write-Host ("    draft 저장       ... 04_blog_drafts\{0}\{1}.md" -f $section, $topic) -ForegroundColor DarkGray
                     Write-Host "    registry         ... working → drafted" -ForegroundColor DarkGray

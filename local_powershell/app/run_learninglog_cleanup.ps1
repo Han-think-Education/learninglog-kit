@@ -56,14 +56,6 @@ foreach ($r in $rows) {
     $s = Get-LLProp $r "source_id"; if ($s) { $rowBySid[$s] = $r }
 }
 
-function Resolve-DraftRow {
-    param($Draft, $Content)
-    $sid = Get-LLDraftSourceId $Content
-    if ($sid -and $rowBySid.ContainsKey($sid)) { return $rowBySid[$sid] }
-    if ($rowByTopic.ContainsKey($Draft.BaseName)) { return $rowByTopic[$Draft.BaseName] }
-    return $null
-}
-
 function Get-CleanupRelativePath {
     param([Parameter(Mandatory)][System.IO.FileInfo]$Draft)
     $rootName = [string]$Draft.PSObject.Properties["CleanupRoot"].Value
@@ -95,13 +87,13 @@ if ($allDrafts.Count -eq 0) {
 $blockedList = [System.Collections.Generic.List[object]]::new()
 foreach ($d in $allDrafts) {
     $c = Read-LLText $d.FullName
-    $row = Resolve-DraftRow $d $c
+    $row = Resolve-LLDraftRow $d $c -RowBySid $rowBySid -RowByTopic $rowByTopic
     # 승인/발행된 글은 차단 대상이 아니다. 04_blog_drafts에 원본 초안이
     # 남아 있어도 이력 보존용 사본이므로 절대 .trash로 이동하지 않는다.
     $rowStatus = (Get-LLProp $row "status").ToLowerInvariant()
     if ($rowStatus -in @("approved", "published") -or
         (Test-LLDraftAlreadyPublished -Draft $d -Row $row -PublishedNames $publishedNames)) { continue }
-    $rel = $d.FullName.Replace($DraftsDir + "\", "").Replace("\", "/")
+    $rel = (Get-CleanupRelativePath -Draft $d).Relative
     $section = ($rel -split "/")[0]
     $b = Get-LLDraftBadges -Content $c -Row $row -Section $section
     if (-not $b.canApprove) {

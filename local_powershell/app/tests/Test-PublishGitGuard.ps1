@@ -212,7 +212,8 @@ try {
     Throws { Get-LLPublishGitState -RepoRoot $nested } 'a nested folder cannot masquerade as the repository root'
 
     $publisherPath = Join-Path $learningLogRoot 'app/run_learninglog_publish.ps1'
-    $publisher = Get-Content -LiteralPath $publisherPath -Raw
+    # 발행 로직은 스크립트와 LearningLog.Publish 모듈(배포 단계 등)에 나뉘어 있다. 두 파일을 합쳐 안전 규칙을 검사한다.
+    $publisher = (Get-Content -LiteralPath $publisherPath -Raw) + "`n" + (Get-Content -LiteralPath (Join-Path $learningLogRoot 'app/core/LearningLog.Publish.psm1') -Raw)
     $tokens = $null; $parseErrors = $null
     [void][System.Management.Automation.Language.Parser]::ParseFile($publisherPath, [ref]$tokens, [ref]$parseErrors)
     Check ($parseErrors.Count -eq 0) 'publisher parses after guard integration'
@@ -222,17 +223,20 @@ try {
     Check ($publisher.Contains('Get-LLDraftSourceId -Content $RawContent') -and $publisher.Contains('Get-LLApprovalSnapshotStatus') -and $publisher.Contains('승인 당시 파일 해시')) 'direct Publisher resolves unique source identity and enforces approval-time hash'
     Check (-not $publisher.Contains('status --porcelain --untracked-files=all -- content 2>&1')) 'UI content status never mixes Git diagnostics into selection records'
 
-    $guardIndex = $publisher.IndexOf('Assert-LLPublishRepositoryReady', $publisher.IndexOf('발행 보안 사전검사 실패'))
-    $copyIndex = $publisher.IndexOf('foreach ($targetPlan in $targetPlans) {', $guardIndex)
-    Check ($guardIndex -ge 0 -and $copyIndex -gt $guardIndex) 'repository guard runs before approved content is copied'
+    # 발행은 단계 함수의 호출 순서(사전검사 → 저장소·대상 검사 → 복사 → 배포)로 안전 순서를 보장한다.
+    $guardIndex = $publisher.IndexOf('Assert-LLPublishTargetsReady -Ctx', $publisher.IndexOf('발행 보안 사전검사 실패'))
+    $copyIndex = $publisher.IndexOf('Invoke-LLPublishCopyStage -Ctx', $guardIndex)
+    Check ($guardIndex -ge 0 -and $copyIndex -gt $guardIndex -and $publisher.Contains('Assert-LLPublishRepositoryReady')) 'repository guard runs before approved content is copied'
     $protectedOutputIndex = $publisher.IndexOf('$protectedPublicPaths')
     $publicPushIndex = $publisher.IndexOf('push origin HEAD:main')
     Check ($protectedOutputIndex -ge 0 -and $publicPushIndex -gt $protectedOutputIndex) 'Git control-file output is blocked before public push'
 
-    $destinationPreflightIndex = $publisher.IndexOf('# 모든 대상 경로를 먼저 검사')
-    $firstCopyIndex = $publisher.IndexOf('$assetCount = Copy-DraftReferencedAssets')
-    $hugoBuildIndex = $publisher.IndexOf('& $hugoCmd --cleanDestinationDir')
-    Check ($destinationPreflightIndex -ge 0 -and $firstCopyIndex -gt $destinationPreflightIndex -and $hugoBuildIndex -gt $destinationPreflightIndex) 'all Publisher destinations are checked before any copy or Hugo build'
+    $destinationPreflightIndex = $publisher.IndexOf('Assert-LLPublishTargetsReady -Ctx')
+    $firstCopyIndex = $publisher.IndexOf('Invoke-LLPublishCopyStage -Ctx')
+    $hugoBuildIndex = $publisher.IndexOf('Invoke-LLPublishDeploy -Ctx')
+    $targetsReadyBodyIndex = $publisher.IndexOf('# 모든 대상 경로를 먼저 검사')   # 대상 충돌 검사는 저장소 준비 단계 함수 안에 있다
+    $copyBodyIndex = $publisher.IndexOf('$assetCount = Copy-LLDraftAssets')
+    Check ($destinationPreflightIndex -ge 0 -and $firstCopyIndex -gt $destinationPreflightIndex -and $hugoBuildIndex -gt $firstCopyIndex -and $targetsReadyBodyIndex -ge 0 -and $copyBodyIndex -gt $targetsReadyBodyIndex -and $publisher.Contains('& $hugoCmd --cleanDestinationDir')) 'all Publisher destinations are checked before any copy or Hugo build'
     Check ($publisher.Contains('Add-LLPublishDestinationPlanEntry') -and $publisher.Contains('Get-LLPublishDestinationDisposition')) 'Publisher rejects conflicts among selected destinations and existing files'
     Check ($publisher.Contains('[System.IO.FileMode]::CreateNew') -and $publisher.Contains('[System.IO.File]::Copy($sourceFull, $dest, $false)')) 'new content and assets use no-overwrite creation semantics'
 

@@ -42,7 +42,7 @@ $ProjectsDir = Get-LLPath "04_blog_drafts\projects"
 $TemplatePath = Get-LLPath "08_templates\project_series_post_template.md"
 $RunTime = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
 
-function ConvertTo-SafeSlug {
+function ConvertTo-ProjectSlug {
     param([Parameter(Mandatory)][AllowEmptyString()][string]$Text)
 
     $s = $Text.ToLowerInvariant()
@@ -186,12 +186,12 @@ if ($Preset -eq "kaggle-house-prices") {
     if (-not $Title -and -not $NoPrompt) { $Title = (Read-Host "  프로젝트 대표 제목").Trim() }
     if (-not $Title) { $Title = "새 프로젝트 기록" }
     if (-not $Slug -and -not $NoPrompt) { $Slug = (Read-Host "  영문 slug (비우면 자동)").Trim() }
-    if (-not $Slug) { $Slug = ConvertTo-SafeSlug $Title }
+    if (-not $Slug) { $Slug = ConvertTo-ProjectSlug $Title }
     $parts = @(Get-CustomParts -ProjectTitle $Title)
 }
 
 $DateText = $Date.ToString("yyyy-MM-dd")
-$Slug = ConvertTo-SafeSlug $Slug
+$Slug = ConvertTo-ProjectSlug $Slug
 
 Write-Host ""
 Write-Host "========================================" -ForegroundColor Cyan

@@ -287,7 +287,7 @@ if (-not $Deploy) {
 # hugo 빌드
 $hugoCmd = (Get-Command hugo -ErrorAction SilentlyContinue).Source
 if (-not $hugoCmd) {
-    $found = Get-ChildItem "C:\Users\Lenovo\AppData\Local\Microsoft\WinGet\Packages" -Recurse -Filter "hugo.exe" -File -ErrorAction SilentlyContinue |
+    $found = Get-ChildItem (Join-Path $env:LOCALAPPDATA "Microsoft\WinGet\Packages") -Recurse -Filter "hugo.exe" -File -ErrorAction SilentlyContinue |
         Where-Object { $_.FullName -like "*Hugo.Hugo.Extended*" } | Select-Object -First 1
     if ($found) { $hugoCmd = $found.FullName }
 }

@@ -27,7 +27,7 @@ Import-Module (Join-Path $PSScriptRoot "core\LearningLog.LocalCore.psm1") -Force
 $DraftDir = Get-LLPath "04_blog_drafts\personal"
 $AssetRoot = Get-LLPath "04_blog_drafts\_assets\personal"
 
-function ConvertTo-SafeSlug {
+function ConvertTo-DailySlug {
     param([Parameter(Mandatory)][string]$Value)
     $s = $Value.ToLowerInvariant() -replace '[^\p{L}\p{Nd}]+', '-'
     $s = $s.Trim('-')
@@ -43,14 +43,6 @@ function ConvertTo-SafeAssetName {
     $base = ($base -replace '[^\p{L}\p{Nd}]+', '-').Trim('-')
     if (-not $base) { $base = "photo" }
     return "$base$ext"
-}
-
-function ConvertTo-YamlString {
-    param([AllowEmptyString()][string]$Value)
-    $s = if ($null -eq $Value) { "" } else { [string]$Value }
-    $s = $s -replace '\\', '\\\\'
-    $s = $s -replace '"', '\\"'
-    return '"' + $s + '"'
 }
 
 Write-Host ""
@@ -90,7 +82,7 @@ if ($imageInput) {
     $imagePaths = @($imageInput -split ',' | ForEach-Object { $_.Trim().Trim('"') } | Where-Object { $_ })
 }
 
-$slug = ConvertTo-SafeSlug $Title
+$slug = ConvertTo-DailySlug $Title
 $assetDir = Join-Path $AssetRoot $slug
 $imageRefs = [System.Collections.Generic.List[string]]::new()
 $imageCaptions = [System.Collections.Generic.List[string]]::new()
@@ -118,16 +110,16 @@ foreach ($source in $imagePaths) {
 }
 
 $tagValues = @($Tags -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
-$tagYaml = if ($tagValues.Count) { (@($tagValues | ForEach-Object { ConvertTo-YamlString $_ }) -join ', ') } else { ConvertTo-YamlString "일상" }
+$tagYaml = if ($tagValues.Count) { (@($tagValues | ForEach-Object { ConvertTo-LLYamlString -KeepNewlines $_ }) -join ', ') } else { ConvertTo-LLYamlString -KeepNewlines "일상" }
 $lines = [System.Collections.Generic.List[string]]::new()
 $lines.Add("---")
-$lines.Add("title: $(ConvertTo-YamlString $Title)")
+$lines.Add("title: $(ConvertTo-LLYamlString -KeepNewlines $Title)")
 $lines.Add("date: $Date")
 $lines.Add("draft: true")
 $lines.Add("public_policy: $policyValue")
 $lines.Add('categories: ["personal"]')
 $lines.Add("tags: [$tagYaml]")
-$lines.Add("description: $(ConvertTo-YamlString ($bodyLines[0]))")
+$lines.Add("description: $(ConvertTo-LLYamlString -KeepNewlines ($bodyLines[0]))")
 $lines.Add("---")
 $lines.Add("")
 $lines.Add("## 목차")

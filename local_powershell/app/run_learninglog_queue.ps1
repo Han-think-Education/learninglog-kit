@@ -16,7 +16,7 @@
       - 원본 파일 수정 없음
       - blog-source 접촉 없음
       - extracted summary 생성 없음
-      - LLM / Ollama 호출 없음
+      - LLM 호출 없음
 
 .PARAMETER IncludeBacklog
     과거에 등록됐지만 아직 처리되지 않은 대기 항목까지 포함한다. 기본값은 오늘 등록분만 표시한다.

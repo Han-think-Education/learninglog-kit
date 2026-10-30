@@ -1,7 +1,7 @@
 #Requires -Version 7.0
 <#
 .SYNOPSIS
-    LearningLog Phase 3 Prep — LLM task 패킷 조립 (Ollama 호출 직전까지만)
+    LearningLog Phase 3 Prep — LLM task 패킷 조립 (LLM 호출 직전까지만)
 
 .DESCRIPTION
     하는 것:
@@ -14,7 +14,7 @@
       - 매니페스트 생성
 
     하지 않는 것 (LLM 직전에서 멈춤):
-      - Ollama / LLM 호출 없음
+      - LLM 호출 없음
       - source_registry.csv 수정 없음
       - 원본 소스 파일 수정 없음
       - 02_extracted / 03_working_notes / 04_blog_drafts 에 결과물 생성 없음
