@@ -17,30 +17,44 @@
 
 .PARAMETER SourceId
     특정 source_id 만 처리
+
+.PARAMETER TodayOnly
+    오늘 등록된 소스의 워킹노트만 처리 (학습일은 어제 등 과거일 수 있음)
+
+.PARAMETER IncludeBacklog
+    과거 날짜의 워킹노트까지 처리 (명시적으로 지정한 경우에만)
 #>
 
 param(
     [string]$SourceId  = "",
     [switch]$Force,
     [int]$NumCtx       = 8192,
-    [int]$MaxCharsPerChunk = 0
+    [int]$MaxCharsPerChunk = 0,
+    [ValidateRange(1,4)][int]$MaxConcepts = 2,
+    [ValidateSet("lm","ollama")][string]$Engine = "lm",
+    [string]$LMStudioBase  = "http://127.0.0.1:1234",
+    [string]$LMStudioModel = "",
+    [switch]$TodayOnly,
+    [switch]$IncludeBacklog
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
-Import-Module (Join-Path $PSScriptRoot "_local_core\LearningLog.LocalCore.psm1") -Force -DisableNameChecking
+Import-Module (Join-Path $PSScriptRoot "core\LearningLog.LocalCore.psm1") -Force -DisableNameChecking
 
 $Root         = Get-LLRoot
 $RegistryPath = Get-LLRegistryPath
 $WorkingDir   = Get-LLPath "03_working_notes\daily_logs"
 $DraftsRoot   = Get-LLPath "04_blog_drafts"
 $OllamaBase   = "http://127.0.0.1:11434"
-$ModelDraft   = "gemma3:12b"   # 7.8b 소형은 JSON 불완전 → '정리 필요.' 양산. 12b 로 상향(필요시 gemma3:27b)
+$ModelDraft   = "gemma3:12b"   # ollama 경로용. 7.8b 소형은 JSON 불완전 → 12b 상향(필요시 gemma3:27b)
+$UseLM        = ($Engine -eq 'lm')   # [엔진] 기본 lm(LM Studio :1234), 폴백 ollama(-Engine ollama)
 
 $RunDT    = Get-Date
 $RunTime  = $RunDT.ToString("yyyy-MM-dd HH:mm:ss")
 $TodayStr = $RunDT.ToString("yyyy-MM-dd")
 $TimeStamp = $RunDT.ToString("yyyyMMdd_HHmmss")
+$TodayScope = -not $IncludeBacklog
 
 Write-Host ""
 Write-Host "========================================" -ForegroundColor Cyan
@@ -48,17 +62,50 @@ Write-Host "  LearningLog Blog Draft Generator" -ForegroundColor Cyan
 Write-Host "  $RunTime" -ForegroundColor Cyan
 Write-Host "========================================" -ForegroundColor Cyan
 
-# ─── Ollama 헬스체크 ─────────────────────────────────────
+# ─── LLM 엔진 헬스체크 (lm=LM Studio / ollama) ───────────
 Write-Host ""
-Write-Host "  Ollama 헬스체크 ... " -ForegroundColor White -NoNewline
-try {
-    $null = Invoke-RestMethod -Uri "$OllamaBase/" -Method Get -TimeoutSec 5 -ErrorAction Stop
-    Write-Host "OK" -ForegroundColor Green
-} catch {
-    Write-Host "FAIL" -ForegroundColor Red
-    Write-Host "  Ollama 를 먼저 실행하세요." -ForegroundColor Yellow
-    exit 1
+if ($UseLM) {
+    Write-Host "  LM Studio 헬스체크 ... " -ForegroundColor White -NoNewline
+    try {
+        $lmModels = Invoke-RestMethod -Uri "$LMStudioBase/v1/models" -Method Get -TimeoutSec 5 -ErrorAction Stop
+        Write-Host "OK" -ForegroundColor Green
+    } catch {
+        Write-Host "FAIL" -ForegroundColor Red
+        Write-Host "  LM Studio 서버(:1234)를 먼저 켜세요:  lms server start" -ForegroundColor Yellow
+        exit 1
+    }
+    if ([string]::IsNullOrWhiteSpace($LMStudioModel)) {
+        # 자동감지: 로드된 첫 비임베딩 모델
+        $LMStudioModel = @($lmModels.data | Where-Object { $_.id -notmatch 'embed' } | Select-Object -ExpandProperty id)[0]
+    }
+    if ([string]::IsNullOrWhiteSpace($LMStudioModel)) {
+        Write-Host "  [ERROR] LM Studio에 로드된 모델이 없습니다. 모델을 Load 하세요." -ForegroundColor Red
+        exit 1
+    }
+    # 지정 모델이 실제 로드 목록에 있는지 확인 — 잘못된 ID면 긴 재시도 대신 즉시 실패.
+    $mc = Test-LLMModelAvailable -Model $LMStudioModel -LMStudioBase $LMStudioBase
+    if (-not $mc.ok) {
+        Write-Host ("  [ERROR] 모델 '{0}' 이(가) LM Studio에 로드돼 있지 않습니다. Load 후 다시 실행하세요." -f $LMStudioModel) -ForegroundColor Red
+        if ($mc.available.Count -gt 0) { Write-Host ("  현재 로드됨: {0}" -f ($mc.available -join ", ")) -ForegroundColor DarkGray }
+        exit 1
+    }
+    $ModelDraft = $LMStudioModel
+    Write-Host ("  엔진: LM Studio  모델: {0}" -f $ModelDraft) -ForegroundColor DarkGray
+} else {
+    Write-Host "  Ollama 헬스체크 ... " -ForegroundColor White -NoNewline
+    try {
+        $null = Invoke-RestMethod -Uri "$OllamaBase/" -Method Get -TimeoutSec 5 -ErrorAction Stop
+        Write-Host "OK" -ForegroundColor Green
+    } catch {
+        Write-Host "FAIL" -ForegroundColor Red
+        Write-Host "  Ollama 를 먼저 실행하세요." -ForegroundColor Yellow
+        exit 1
+    }
+    Write-Host ("  엔진: Ollama  모델: {0}" -f $ModelDraft) -ForegroundColor DarkGray
 }
+
+# 공통 슬롯 생성기의 재시도 대상도 이번 실행 엔진으로 고정한다.
+Set-LLMRecoveryEndpoint -Engine $Engine -LMStudioBase $LMStudioBase -OllamaBase $OllamaBase
 
 # ─── 청크 크기 계산 ──────────────────────────────────────
 $DefaultPolicy = Get-LLProcessingPolicy -SourceType "personal_note" -SourceCategory "personal_note" -FileType "md" -ManualChunkChars $MaxCharsPerChunk
@@ -74,8 +121,38 @@ $publishedNames = Get-LLPublishedNames   # 06_published 에 있는 글은 draft 
 $PublishedDirCheck = Get-LLPath "06_published"
 
 # ─── Ollama 호출 헬퍼 ────────────────────────────────────
+# ─── LM Studio (OpenAI 호환) 헬퍼 ────────────────────────
+function Invoke-LMStudioGenerate {
+    param([string]$Model, [string]$Prompt, [int]$NumPredict = 1024)
+    $bodyObj = [ordered]@{ model = $Model
+                           messages = @([ordered]@{ role = "user"; content = $Prompt })
+                           stream = $false; temperature = 0.3; max_tokens = $NumPredict }
+    $bytes = [System.Text.Encoding]::UTF8.GetBytes(($bodyObj | ConvertTo-Json -Depth 6 -Compress))
+    $resp = Invoke-RestMethod -Uri "$LMStudioBase/v1/chat/completions" -Method Post `
+            -Body $bytes -ContentType "application/json; charset=utf-8" -TimeoutSec 600 -ErrorAction Stop
+    $text = [string]$resp.choices[0].message.content
+    if ([string]::IsNullOrWhiteSpace($text)) { throw "LM Studio 빈 응답 (모델 thinking 모드가 켜져 있으면 끄세요)" }
+    return $text
+}
+
+function Invoke-LMStudioGenerateJson {
+    param([string]$Model, [string]$Prompt, [int]$NumPredict = 2048)
+    # ollama format=json 대체: OpenAI response_format=json_schema (범용 object 스키마)
+    $rf = [ordered]@{ type = "json_schema"
+                      json_schema = [ordered]@{ name = "obj"; strict = $false
+                                                schema = [ordered]@{ type = "object"; additionalProperties = $true } } }
+    $bodyObj = [ordered]@{ model = $Model
+                           messages = @([ordered]@{ role = "user"; content = $Prompt })
+                           stream = $false; temperature = 0.3; max_tokens = $NumPredict; response_format = $rf }
+    $bytes = [System.Text.Encoding]::UTF8.GetBytes(($bodyObj | ConvertTo-Json -Depth 8 -Compress))
+    $resp = Invoke-RestMethod -Uri "$LMStudioBase/v1/chat/completions" -Method Post `
+            -Body $bytes -ContentType "application/json; charset=utf-8" -TimeoutSec 600 -ErrorAction Stop
+    return [string]$resp.choices[0].message.content
+}
+
 function Invoke-OllamaGenerate {
     param([string]$Model, [string]$Prompt)
+    if ($UseLM) { return Invoke-LMStudioGenerate -Model $Model -Prompt $Prompt -NumPredict 1024 }
     $bodyObj   = [ordered]@{ model = $Model; prompt = $Prompt; stream = $false
                               options = [ordered]@{ num_predict = 1024; num_ctx = $NumCtx } }
     $bodyBytes = [System.Text.Encoding]::UTF8.GetBytes(($bodyObj | ConvertTo-Json -Depth 4 -Compress))
@@ -86,6 +163,7 @@ function Invoke-OllamaGenerate {
 
 function Invoke-OllamaGenerateJson {
     param([string]$Model, [string]$Prompt, [int]$NumPredict = 2048)
+    if ($UseLM) { return Invoke-LMStudioGenerateJson -Model $Model -Prompt $Prompt -NumPredict $NumPredict }
     $bodyObj   = [ordered]@{ model = $Model; prompt = $Prompt; stream = $false; format = "json"
                               options = [ordered]@{ num_predict = $NumPredict; num_ctx = $NumCtx; temperature = 0.3 } }
     $bodyBytes = [System.Text.Encoding]::UTF8.GetBytes(($bodyObj | ConvertTo-Json -Depth 4 -Compress))
@@ -324,9 +402,66 @@ function Update-RegistryStatus { param([string]$Sid, [string]$NewStatus)
     $null = Set-LLRegistryStatus -SourceId $Sid -Status $NewStatus
 }
 
+function Get-LLWorkingNoteDate {
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][string]$FallbackDate
+    )
+
+    # 업로드/등록일(date_added)과 실제 학습일(note_date)은 다를 수 있다.
+    # 늦게 업로드한 노트도 원래 학습일을 글 날짜로 유지한다.
+    try {
+        $lines = [System.IO.File]::ReadAllLines($Path, [System.Text.Encoding]::UTF8)
+        $inFrontMatter = ($lines.Count -gt 0 -and $lines[0].Trim() -eq '---')
+        for ($i = 1; $i -lt $lines.Count -and $inFrontMatter; $i++) {
+            if ($lines[$i].Trim() -eq '---') { break }
+            if ($lines[$i] -match '^\s*note_date:\s*(\d{4}-\d{2}-\d{2})\s*$') {
+                return $Matches[1]
+            }
+        }
+    } catch {}
+
+    $baseName = [System.IO.Path]::GetFileNameWithoutExtension($Path)
+    if ($baseName -match '^(\d{4}-\d{2}-\d{2})_(?:am|pm)-') {
+        return $Matches[1]
+    }
+    return $FallbackDate
+}
+
+function Get-LLWorkingNoteSourceId {
+    param([Parameter(Mandatory)][string]$Path)
+    try {
+        $lines = [System.IO.File]::ReadAllLines($Path, [System.Text.Encoding]::UTF8)
+        $inFrontMatter = ($lines.Count -gt 0 -and $lines[0].Trim() -eq '---')
+        for ($i = 1; $i -lt $lines.Count -and $inFrontMatter; $i++) {
+            if ($lines[$i].Trim() -eq '---') { break }
+            $line = $lines[$i]
+            if ($line -match '^\s*source_id:\s*(.+?)\s*$') { return $Matches[1].Trim() }
+        }
+    } catch {}
+    return ""
+}
+
 # ─── 워킹 노트 스캔 ──────────────────────────────────────
 $workingFiles = @(Get-ChildItem -Path $WorkingDir -Filter "*.md" -File | Sort-Object Name)
-Write-Host ("  워킹 노트: {0} 개" -f $workingFiles.Count) -ForegroundColor Yellow
+if ($TodayScope) {
+    # 기본 범위는 '파일 날짜가 오늘'이 아니라 '오늘 등록된 소스'다.
+    # 어제 학습하고 오늘 업로드한 노트도 포함하되, 과거 backlog는 열지 않는다.
+    $workingFiles = @($workingFiles | Where-Object {
+        $sid = Get-LLWorkingNoteSourceId -Path $_.FullName
+        if (-not $sid) { return $false }
+        $row = @($registry | Where-Object { $_.source_id -eq $sid } | Select-Object -First 1)
+        if ($row.Count -eq 0) { return $false }
+        $uploadDate = ([string]$row.date_added).Trim()
+        if ($uploadDate.Length -gt 10) { $uploadDate = $uploadDate.Substring(0, 10) }
+        $st = ([string]$row.status).Trim().ToLowerInvariant()
+        # 오늘 등록분 + 아직 초안 안 된 미완성(working) 잔여를 함께 처리한다(날짜가 넘어가도 안 끊김).
+        ($uploadDate -eq $TodayStr) -or ($st -eq "working")
+    })
+    Write-Host ("  워킹 노트: {0} 개 (오늘 등록분: {1}, 학습일 무관)" -f $workingFiles.Count, $TodayStr) -ForegroundColor Yellow
+} else {
+    Write-Host ("  워킹 노트: {0} 개" -f $workingFiles.Count) -ForegroundColor Yellow
+}
 
 $doneCount = 0; $skipCount = 0; $errCount = 0
 
@@ -345,6 +480,10 @@ foreach ($wf in $workingFiles) {
     }
 }
 
+# 컨트롤센터 진행바용: 이번 단계에서 만들 글 수 = am/pm 합본 + 개별 노트
+$progTotal = $groups.Count + @($workingFiles | Where-Object { $_.BaseName -notmatch '^(\d{4}-\d{2}-\d{2})_(am|pm)-' }).Count
+$progIdx = 0
+
 foreach ($gk in ($groups.Keys | Sort-Object)) {
     $gDate, $gHalf = $gk -split '\|'
     $gFiles = $groups[$gk]
@@ -356,6 +495,8 @@ foreach ($gk in ($groups.Keys | Sort-Object)) {
 
     Write-Host ""
     Write-Host ("  [합본] {0} {1} — 노트 {2}개" -f $gDate, $halfKo, $gFiles.Count) -ForegroundColor Magenta
+    $progIdx++
+    Set-LLJobItem -Done ($progIdx - 1) -Total $progTotal -Item ("{0} {1} 합본 (노트 {2}개)" -f $gDate, $halfKo, $gFiles.Count) -Detail "노트 제목 정리" -SubDone 0 -SubTotal ($gFiles.Count + 1)
 
     # 같은 날짜·반일의 합본이 이미 있으면 skip (수동/GPT 합본 'YYYY-MM-DD-am-*.md' 포함)
     $already = @(Get-ChildItem -Path $PublishedDirCheck -Filter "$gDate-$gHalf-*.md" -ErrorAction SilentlyContinue) +
@@ -376,7 +517,9 @@ foreach ($gk in ($groups.Keys | Sort-Object)) {
             $rowM = $registry | Where-Object { $_.source_id -eq $sidM } | Select-Object -First 1
             if ($null -eq $rowM) { continue }
             if (-not (Test-LLPublishableSource $rowM)) { continue }
-            if ($rowM.PSObject.Properties['status'] -and $rowM.status -eq 'archived') { continue }
+            $statusM = ""
+            if ($rowM.PSObject.Properties['status']) { $statusM = ([string]$rowM.status).Trim().ToLowerInvariant() }
+            if ($statusM -in @('rejected','needs_review','archived')) { continue }
             $rawM = [System.IO.File]::ReadAllText($f.FullName, [System.Text.Encoding]::UTF8)
             $ctxM = Remove-ExtraHugoFrontMatter -Text $rawM
             if ($ctxM.Length -gt 3500) { $ctxM = $ctxM.Substring(0, 3500) }
@@ -396,11 +539,14 @@ foreach ($gk in ($groups.Keys | Sort-Object)) {
         }
 
         Write-Host ("    daily_draft ... {0} " -f $ModelDraft) -ForegroundColor White -NoNewline
+        Set-LLJobItem -SubDone 0 -SubTotal ($members.Count + 1) -Detail "섹션 작성 준비"
 
         # 노트당 섹션 1개 채우기 (칸별 plain-text, 회복 대기 내장)
         $rule = " 마크다운 헤딩(#) 금지. 학습자 1인칭 한국어. 강의 원문 복붙 금지. 사족 없이 본문만 출력."
         $sections = @()
+        $mi = 0
         foreach ($m in $members) {
+            Set-LLJobItem -SubDone $mi -Detail ("섹션 {0}/{1} 작성 · {2}" -f ($mi + 1), $members.Count, $m.Title)
             $ctx = "학습 노트:`n---`n$($m.Ctx)`n---`n"
             $sections += [pscustomobject]@{
                 Heading    = $m.Title
@@ -409,7 +555,9 @@ foreach ($gk in ($groups.Keys | Sort-Object)) {
                 Understood = (Get-LLFieldText -LLMInvoker $llmTextG -Prompt ($ctx + "최종적으로 정리된 이해를 2~3문장으로 써라." + $rule))
                 Code       = (Get-LLFieldText -LLMInvoker $llmTextG -AllowEmpty -Prompt ($ctx + "핵심을 보여주는 코드 예시'만' 백틱3개 코드블록으로 출력하라. 노트에 코드 근거가 없으면 아무것도 쓰지 마라."))
             }
+            $mi++
         }
+        Set-LLJobItem -SubDone $members.Count -Detail "총평·제목 생성"
 
         # 총평 + 제목
         $digest = ($sections | ForEach-Object { "- " + $_.Heading + ": " + $_.Learned }) -join "`n"
@@ -419,8 +567,8 @@ foreach ($gk in ($groups.Keys | Sort-Object)) {
             caution = (Get-LLFieldText -LLMInvoker $llmTextG -Prompt ($rctx + "'다음에 조심할 것'을 2~3문장으로 써라." + $rule))
             review  = (Get-LLFieldText -LLMInvoker $llmTextG -Prompt ($rctx + "'다음에 복습할 주제'를 2~3문장으로 써라." + $rule))
         }
-        $gTitle = (Get-LLFieldText -LLMInvoker $llmTextG -Prompt ($rctx + "이 $halfKo 학습글의 블로그 제목을 한 줄로 지어라. '학습 노트'라는 표현 금지. 따옴표 없이 제목만 출력." + $rule))
-        if (-not $gTitle -or $gTitle -match '학습 노트') { $gTitle = "$gDate $halfKo SQL 학습 정리: " + $members[0].Title }
+        $gTitle = (Get-LLFieldText -LLMInvoker $llmTextG -Prompt ($rctx + "이 $halfKo 학습글의 블로그 제목을 지어라. 반드시 한 줄, 20~42자, 핵심 주제 1개만 사용하라. '오늘', '$halfKo', '정리했습니다', '학습 노트'는 쓰지 말고, 문장이나 설명·목록·줄바꿈 없이 제목만 출력하라." + $rule))
+        if (-not $gTitle -or $gTitle -match '학습 노트') { $gTitle = $members[0].Title }
         $gTags = @($members | ForEach-Object { $_.Tags } | Select-Object -Unique | Select-Object -First 8)
 
         $resultG = New-LLDailyPost -Title $gTitle -Date $gDate -Half $gHalf -Sections $sections -Review $review -Tags $gTags
@@ -447,7 +595,7 @@ foreach ($gk in ($groups.Keys | Sort-Object)) {
         # 멤버 노트 상태 → drafted (합본으로 소비됨)
         foreach ($m in $members) { Update-RegistryStatus -Sid $m.Sid -NewStatus "drafted" }
 
-        $issG = @(Get-LLDraftQualityIssues -Content $resultG)
+        $issG = @(Get-LLDraftQualityIssues -Content $resultG -Section "learning")
         if ($issG.Count -gt 0) {
             Write-Host ("WARN ({0})" -f ($issG -join ", ")) -ForegroundColor Yellow
         } else {
@@ -464,6 +612,8 @@ foreach ($gk in ($groups.Keys | Sort-Object)) {
 
 foreach ($wf in $workingFiles) {
     if ($consumed.Contains($wf.FullName)) { continue }   # am/pm 합본으로 소비됨 — 개별 생성 안 함
+    $progIdx++
+    Set-LLJobItem -Done ($progIdx - 1) -Total $progTotal -Item $wf.BaseName -Detail "개별 초안 작성" -SubDone 0 -SubTotal 0
 
     # front matter 에서 source_id 파싱
     $lines = [System.IO.File]::ReadAllLines($wf.FullName, [System.Text.Encoding]::UTF8)
@@ -480,6 +630,14 @@ foreach ($wf in $workingFiles) {
     if ($null -eq $row) { Write-Host ("  [SKIP] {0} — registry 없음" -f $sid) -ForegroundColor DarkGray; $skipCount++; continue }
     if (-not (Test-LLPublishableSource $row)) {
         Write-Host ("  [SKIP] {0} — publish policy/category gate" -f $sid) -ForegroundColor DarkGray; $skipCount++; continue
+    }
+
+    # 수동 관리 상태는 자동 재생성 금지. 다시 처리하려면 레지스트리 상태를 먼저 되돌린다.
+    $rowStatus = ""
+    if ($row.PSObject.Properties['status']) { $rowStatus = ([string]$row.status).Trim().ToLowerInvariant() }
+    if ($rowStatus -in @('rejected','needs_review','archived')) {
+        Write-Host ("  [SKIP] {0} — {1} (수동 관리 상태)" -f $sid, $rowStatus) -ForegroundColor DarkGray
+        $skipCount++; continue
     }
 
     $topic   = $row.topic
@@ -516,12 +674,6 @@ foreach ($wf in $workingFiles) {
         Write-Host "    blog_draft  ... SKIP (이미 발행됨 — 과거 글)" -ForegroundColor DarkGray
         $skipCount++; continue
     }
-    # archived 상태(예: dev 로 옮긴 글)도 재생성 안 함
-    if (-not $Force -and ($row.PSObject.Properties['status']) -and ($row.status -eq 'archived')) {
-        Write-Host "    blog_draft  ... SKIP (archived — 수동 관리)" -ForegroundColor DarkGray
-        $skipCount++; continue
-    }
-
     if ((Test-Path $draftPath) -and (-not $Force)) {
         Write-Host "    blog_draft  ... SKIP (이미 존재, -Force 로 재생성)" -ForegroundColor DarkGray
         $skipCount++; continue
@@ -547,7 +699,7 @@ foreach ($wf in $workingFiles) {
         # 생성 (placeholder 검출 시 런너 회복 대기 후 1회 전체 재생성 — 글당 최대 2회)
         $result = ""; $draftIssues = @()
         for ($genTry = 1; $genTry -le 2; $genTry++) {
-            $conceptNames = @(Get-LLConceptList -NoteContent $noteCtx -LLMInvoker $llmText -MaxConcepts 4)
+            $conceptNames = @(Get-LLConceptList -NoteContent $noteCtx -LLMInvoker $llmText -MaxConcepts $MaxConcepts)
             if ($conceptNames.Count -eq 0) { $conceptNames = @("학습 내용") }
 
             $concepts = @()
@@ -560,15 +712,16 @@ foreach ($wf in $workingFiles) {
             $review = Get-LLOverallReview -NoteContent $noteCtx -ConceptNames $conceptNames -LLMInvoker $llmText
             $postTitle = Get-BlogDraftTitle -Topic $topic -NoteContext $noteCtx -ConceptNames $conceptNames -LLMInvoker $llmText
 
-            $result = New-LLOutlineFromSlots -Title $postTitle -Date $TodayStr -Section $section `
+            $postDate = Get-LLWorkingNoteDate -Path $wf.FullName -FallbackDate $TodayStr
+            $result = New-LLOutlineFromSlots -Title $postTitle -Date $postDate -Section $section `
                         -Concepts $concepts -Review $review
             $result = Repair-LLIndentedCodeFences -Content $result   # 중첩/들여쓴 코드펜스 평탄화
 
-            $draftIssues = @(Get-LLDraftQualityIssues -Content $result)
+            $draftIssues = @(Get-LLDraftQualityIssues -Content $result -Row $row -Section $section)
             if (($draftIssues -join " ") -notmatch 'placeholder') { break }   # placeholder 없으면 확정
             if ($genTry -lt 2) {
-                Write-Host "    (placeholder 검출 — 런너 회복 대기 후 전체 재생성)" -ForegroundColor DarkYellow
-                $null = Wait-LLOllamaReady
+                Write-Host "    (placeholder 검출 — 현재 엔진 상태 확인 후 전체 재생성)" -ForegroundColor DarkYellow
+                $null = Wait-LLMReady
             }
         }
         [System.IO.File]::WriteAllText($draftPath, $result, [System.Text.Encoding]::UTF8)
@@ -591,6 +744,8 @@ foreach ($wf in $workingFiles) {
     }
 }
 
+Set-LLJobItem -Done $progTotal -Total $progTotal -Item "" -Detail "초안 생성 완료" -SubDone 0 -SubTotal 0
+
 # ─── 요약 ────────────────────────────────────────────────
 Write-Host ""
 Write-Host "========================================" -ForegroundColor Cyan
@@ -600,6 +755,6 @@ Write-Host ("  생성 완료: {0}" -f $doneCount) -ForegroundColor Green
 Write-Host ("  skip:     {0}" -f $skipCount)  -ForegroundColor DarkGray
 if ($errCount -gt 0) { Write-Host ("  오류:     {0}" -f $errCount) -ForegroundColor Red }
 Write-Host ""
-Write-Host "  다음: LearningLog.bat → [6] publish 로 발행" -ForegroundColor Yellow
+Write-Host "  다음: 컨트롤센터에서 '미리보기·승인 열기' → 승인 후 '발행'" -ForegroundColor Yellow
 Write-Host "========================================" -ForegroundColor Cyan
 Write-Host ""

@@ -1,4 +1,4 @@
-#Requires -Version 7.0
+﻿#Requires -Version 7.0
 <#
 .SYNOPSIS
     LearningLog Unpublish — 잘못 발행된 글을 라이브/모든 단계에서 내림 (복구 가능)
@@ -28,21 +28,24 @@ param(
     [string]$ListFile = "",
     [string[]]$Name = @(),
     [switch]$Deploy,
+    [switch]$Yes,
     [switch]$WhatIfList
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
-Import-Module (Join-Path $PSScriptRoot "_local_core\LearningLog.LocalCore.psm1") -Force -DisableNameChecking
+Import-Module (Join-Path $PSScriptRoot "core\LearningLog.LocalCore.psm1") -Force -DisableNameChecking
+Import-Module (Join-Path $PSScriptRoot "core\LearningLog.PublishGitGuard.psm1") -Force -DisableNameChecking
 
 $RunDT   = Get-Date
 $RunTime = $RunDT.ToString("yyyy-MM-dd HH:mm:ss")
 $Stamp   = $RunDT.ToString("yyyyMMdd_HHmmss")
 $null    = Ensure-LLRegistrySchema
 
-$BlogSourceRoot = "C:\Ollama-IPEX\blog-source"
+$BlogSourceRoot = Get-LLBlogRoot
 $TrashRoot      = Get-LLPath ".trash\unpublish_$Stamp"
 $LogPath        = Get-LLPath "09_reports\unpublish_log.csv"
+$HugoInputPathspecs = @('content', 'static', 'assets', 'layouts', 'data', 'i18n', 'archetypes', 'config', 'themes', 'hugo.toml', 'hugo.yaml', 'hugo.json')
 
 function ConvertTo-UnpublishFileName {
     param([string]$Value)
@@ -116,7 +119,7 @@ if ($names.Count -eq 0) {
         }
         Write-Host ""
         Write-Host "  번호, URL, slug, 파일명을 입력할 수 있습니다. 여러 개는 쉼표로 구분하세요." -ForegroundColor DarkGray
-        Write-Host "  예: 1 또는 https://han-think.github.io/learning/consulting-report-prompting/" -ForegroundColor DarkGray
+        Write-Host "  예: 1 또는 https://<your-id>.github.io/learning/<post-slug>/" -ForegroundColor DarkGray
     } else {
         Write-Host ""
         Write-Host "  블로그 원본 목록을 찾지 못했습니다. URL, slug, 파일명을 직접 입력하세요." -ForegroundColor Yellow
@@ -194,10 +197,43 @@ foreach ($h in $hits) {
 }
 Write-Host ""
 Write-Host ("  대상은 삭제가 아니라 백업 후 .trash 로 이동됩니다: {0}" -f $TrashRoot) -ForegroundColor DarkGray
-$confirmRemove = (Read-Host "  위 사본을 내릴까요? (Y/N)").Trim().ToUpperInvariant()
+$confirmRemove = if ($Yes) { "Y" } else { (Read-Host "  위 사본을 내릴까요? (Y/N)").Trim().ToUpperInvariant() }
 if ($confirmRemove -ne "Y") {
     Write-Host "  취소됨. 아무 파일도 이동하지 않았습니다." -ForegroundColor DarkGray
     exit 0
+}
+
+# -Deploy は Blog と public の両方がクリーンな場合だけ開始する。
+# これを最初の Move-Item より前に行い、ローカル削除後に既存変更が原因で
+# deploy を止める状態を避ける。Git 작업은 아래에서 선택 경로만 stage한다.
+$sourcePathsToStage = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+$blogRootFull = [System.IO.Path]::GetFullPath($BlogSourceRoot).TrimEnd('\', '/')
+$blogContentRootFull = [System.IO.Path]::GetFullPath((Join-Path $BlogSourceRoot 'content')).TrimEnd('\', '/')
+$blogContentPrefix = $blogContentRootFull + [System.IO.Path]::DirectorySeparatorChar
+foreach ($hit in $hits) {
+    $hitFull = [System.IO.Path]::GetFullPath($hit.Path)
+    if (-not $hitFull.StartsWith($blogContentPrefix, [System.StringComparison]::OrdinalIgnoreCase)) { continue }
+    $relative = $hitFull.Substring($blogRootFull.Length + 1).Replace('\', '/')
+    if (-not $relative.StartsWith('content/', [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw "Unpublish 대상 경로가 Blog content 밖입니다: $($hit.Path)"
+    }
+    $null = $sourcePathsToStage.Add($relative)
+}
+
+if ($Deploy) {
+    try {
+        $null = Assert-LLPublishRepositoryReady `
+            -RepoRoot $BlogSourceRoot `
+            -IgnoredPathspecs $HugoInputPathspecs `
+            -Label 'blog-source'
+        $null = Assert-LLPublishRepositoryReady `
+            -RepoRoot (Join-Path $BlogSourceRoot 'public') `
+            -IgnoredPathspecs @('.') `
+            -Label 'public'
+    } catch {
+        Write-Host ("  [ERROR] 배포 저장소가 깨끗하지 않아 파일 이동 전에 중단합니다: {0}" -f $_.Exception.Message) -ForegroundColor Red
+        exit 1
+    }
 }
 
 # ── 백업 + 제거 ──
@@ -205,7 +241,7 @@ $rows = @(Get-LLRegistryRows)
 $logEntries = [System.Collections.Generic.List[object]]::new()
 $removed = 0
 foreach ($h in $hits) {
-    $rel = $h.Path.Replace("C:\Ollama-IPEX\", "").Replace("\", "/")
+    $rel = $h.Path.Replace((Split-Path -Parent $BlogSourceRoot).TrimEnd('\') + '\', "").Replace("\", "/")
     $dest = Join-Path $TrashRoot $rel
     $destDir = Split-Path -Parent $dest
     if (-not (Test-Path -LiteralPath $destDir)) { New-Item -ItemType Directory -Path $destDir -Force | Out-Null }
@@ -266,30 +302,97 @@ Pop-Location
 if ($he -ne 0) { Write-Host "  [ERROR] hugo 빌드 실패 (exit $he)" -ForegroundColor Red; exit $he }
 Write-Host "  Hugo 빌드 완료" -ForegroundColor Green
 
+# hugo --cleanDestinationDir 가 public 서브모듈의 .git 포인터 파일을 지운다.
+# 포인터가 없으면 public 안의 git 명령이 "unpopulated submodule"로 전부 실패하므로 복원한다.
+$publicGitPointer = Join-Path (Join-Path $BlogSourceRoot "public") ".git"
+if (-not (Test-Path -LiteralPath $publicGitPointer)) {
+    Set-Content -LiteralPath $publicGitPointer -Value 'gitdir: ../.git/modules/public' -NoNewline -Encoding ascii
+    Write-Host "  public\.git 포인터 복원됨 (cleanDestinationDir 삭제 대응)" -ForegroundColor DarkGray
+}
+
 $TodayStr = $RunDT.ToString("yyyy-MM-dd")
+$PublicDir = Join-Path $BlogSourceRoot 'public'
 Write-Host "  [2/3] 라이브(public) 푸시..." -ForegroundColor Cyan
-Push-Location (Join-Path $BlogSourceRoot "public")
-git add -A
-git diff --cached --quiet
-if ($LASTEXITCODE -ne 0) { git commit -m "LearningLog unpublish: remove $($names.Count) broken posts ($TodayStr)" 2>&1 | Out-Host }
-git push origin main
+$publicState = Get-LLPublishGitState -RepoRoot $PublicDir -IgnoredPathspecs @('.')
+if (@($publicState.staged_paths).Count -gt 0) {
+    Write-Host ("  [ERROR] public 에 기존 stage 변경이 생겨 푸시를 중단합니다: {0}" -f (Format-LLPublishPaths $publicState.staged_paths)) -ForegroundColor Red
+    exit 1
+}
+if (@($publicState.ignored_paths).Count -gt 0) {
+    Write-Host ("  [ERROR] public 에 무시된 생성물이 있어 푸시를 중단합니다: {0}" -f (Format-LLPublishPaths $publicState.ignored_paths)) -ForegroundColor Red
+    exit 1
+}
+$publicPaths = @($publicState.working_paths)
+if ($publicPaths.Count -gt 0) {
+    try {
+        $null = Add-LLPublishPathsToIndex -RepoRoot $PublicDir -Paths $publicPaths
+    } catch {
+        Write-Host ("  [ERROR] public 허용 경로 stage 실패: {0}" -f $_.Exception.Message) -ForegroundColor Red
+        exit 1
+    }
+}
+try {
+    $null = Assert-LLPublishRepositoryPathsAllowed -RepoRoot $PublicDir -AllowedPaths $publicPaths -Label 'public'
+} catch {
+    Write-Host ("  [ERROR] public stage 경계 검사 실패: {0}" -f $_.Exception.Message) -ForegroundColor Red
+    exit 1
+}
+git -C $PublicDir diff --cached --quiet
+$publicDiffExit = $LASTEXITCODE
+if ($publicDiffExit -gt 1) { Write-Host "  [ERROR] public stage 상태 확인 실패" -ForegroundColor Red; exit $publicDiffExit }
+if ($publicDiffExit -eq 1) {
+    git -C $PublicDir commit -m "LearningLog unpublish: remove $($names.Count) broken posts ($TodayStr)" 2>&1 | Out-Host
+    if ($LASTEXITCODE -ne 0) { Write-Host "  [ERROR] public 커밋 실패" -ForegroundColor Red; exit $LASTEXITCODE }
+}
+git -C $PublicDir push origin main
 $pp = $LASTEXITCODE
-Pop-Location
 if ($pp -ne 0) { Write-Host "  [ERROR] public 푸시 실패" -ForegroundColor Red; exit $pp }
 Write-Host "  라이브 반영 완료" -ForegroundColor Green
 
 Write-Host "  [3/3] 소스(blog-source) 푸시..." -ForegroundColor Cyan
-Push-Location $BlogSourceRoot
-git add -A
-git diff --cached --quiet
-if ($LASTEXITCODE -ne 0) { git commit -m "LearningLog unpublish: remove $($names.Count) broken posts ($TodayStr)" 2>&1 | Out-Host }
-git push
+$blogAllowedPaths = @($sourcePathsToStage | ForEach-Object { $_ }) + @('public') | Select-Object -Unique
+try {
+    $sourceState = Assert-LLPublishRepositoryPathsAllowed `
+        -RepoRoot $BlogSourceRoot `
+        -AllowedPaths $blogAllowedPaths `
+        -IgnoredPathspecs $HugoInputPathspecs `
+        -Label 'blog-source'
+} catch {
+    Write-Host ("  [ERROR] blog-source 변경 경계 검사 실패: {0}" -f $_.Exception.Message) -ForegroundColor Red
+    exit 1
+}
+$sourcePaths = @($sourceState.working_paths)
+if ($sourcePaths.Count -gt 0) {
+    try {
+        $null = Add-LLPublishPathsToIndex -RepoRoot $BlogSourceRoot -Paths $sourcePaths
+    } catch {
+        Write-Host ("  [ERROR] blog-source 허용 경로 stage 실패: {0}" -f $_.Exception.Message) -ForegroundColor Red
+        exit 1
+    }
+}
+try {
+    $null = Assert-LLPublishRepositoryPathsAllowed `
+        -RepoRoot $BlogSourceRoot `
+        -AllowedPaths $blogAllowedPaths `
+        -IgnoredPathspecs $HugoInputPathspecs `
+        -Label 'blog-source'
+} catch {
+    Write-Host ("  [ERROR] blog-source stage 경계 검사 실패: {0}" -f $_.Exception.Message) -ForegroundColor Red
+    exit 1
+}
+git -C $BlogSourceRoot diff --cached --quiet
+$sourceDiffExit = $LASTEXITCODE
+if ($sourceDiffExit -gt 1) { Write-Host "  [ERROR] blog-source stage 상태 확인 실패" -ForegroundColor Red; exit $sourceDiffExit }
+if ($sourceDiffExit -eq 1) {
+    git -C $BlogSourceRoot commit -m "LearningLog unpublish: remove $($names.Count) broken posts ($TodayStr)" 2>&1 | Out-Host
+    if ($LASTEXITCODE -ne 0) { Write-Host "  [ERROR] blog-source 커밋 실패" -ForegroundColor Red; exit $LASTEXITCODE }
+}
+git -C $BlogSourceRoot push
 $sp = $LASTEXITCODE
-Pop-Location
 if ($sp -ne 0) { Write-Host "  [ERROR] blog-source 푸시 실패" -ForegroundColor Red; exit $sp }
 Write-Host "  소스 백업 완료" -ForegroundColor Green
 
 Write-Host ""
-Write-Host "  배포 완료! https://han-think.github.io/ 에서 제거 확인" -ForegroundColor Green
+Write-Host "  배포 완료! https://<your-id>.github.io/ 에서 제거 확인" -ForegroundColor Green
 Write-Host "========================================" -ForegroundColor Cyan
 exit 0

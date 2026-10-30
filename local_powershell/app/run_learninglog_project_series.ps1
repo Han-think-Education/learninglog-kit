@@ -36,7 +36,7 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
-Import-Module (Join-Path $PSScriptRoot "_local_core\LearningLog.LocalCore.psm1") -Force -DisableNameChecking
+Import-Module (Join-Path $PSScriptRoot "core\LearningLog.LocalCore.psm1") -Force -DisableNameChecking
 
 $ProjectsDir = Get-LLPath "04_blog_drafts\projects"
 $TemplatePath = Get-LLPath "08_templates\project_series_post_template.md"
@@ -224,7 +224,6 @@ foreach ($part in $parts) {
         "categories: [`"projects`"]",
         "tags: [$tagText]",
         "description: `"$desc`"",
-        "lang: `"ko`"",
         "---",
         ""
     ) -join "`n"

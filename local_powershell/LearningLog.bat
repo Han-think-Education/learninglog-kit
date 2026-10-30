@@ -1,3 +1,3 @@
 @echo off
 cd /d "%~dp0"
-pwsh -ExecutionPolicy Bypass -File "learninglog_launch.ps1"
+pwsh -NoProfile -ExecutionPolicy Bypass -File "run\learninglog_launch.ps1"

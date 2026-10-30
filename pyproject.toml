@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "learninglog-kit"
-version = "0.5.4"
+version = "0.6.0"
 description = "Personal learning pipeline — intake, extract, publish with any LLM"
 readme = "README.md"
 requires-python = ">=3.10"

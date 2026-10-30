@@ -17,14 +17,14 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
-Import-Module (Join-Path $PSScriptRoot "_local_core\LearningLog.LocalCore.psm1") -Force -DisableNameChecking
+Import-Module (Join-Path $PSScriptRoot "core\LearningLog.LocalCore.psm1") -Force -DisableNameChecking
 
 $Root = Get-LLRoot
 $RunDT = Get-Date
 $RunTime = $RunDT.ToString("yyyy-MM-dd HH:mm:ss")
 $TimeStamp = $RunDT.ToString("yyyyMMdd_HHmmss")
 $ReportsDir = Get-LLPath "09_reports"
-$BlogSourceRoot = "C:\Ollama-IPEX\blog-source\content"
+$BlogSourceRoot = Join-Path (Get-LLBlogRoot) "content"
 
 if (-not (Test-Path -LiteralPath $ReportsDir)) {
     New-Item -ItemType Directory -Path $ReportsDir -Force | Out-Null

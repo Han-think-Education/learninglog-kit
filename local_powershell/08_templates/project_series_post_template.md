@@ -5,7 +5,6 @@ draft: true
 categories: ["projects"]
 tags: ["project"]
 description: "프로젝트 글의 핵심 요약"
-lang: "ko"
 ---
 
 ## 목차

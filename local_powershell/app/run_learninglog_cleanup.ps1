@@ -5,9 +5,9 @@
 
 .DESCRIPTION
     하는 것:
-      - 04_blog_drafts\ 초안 스캔 → Get-LLDraftBadges 로 canApprove 판정
+      - 04_blog_drafts\ 및 05_ready_to_publish\ 초안 스캔 → Get-LLDraftBadges 로 canApprove 판정
       - 차단된(canApprove=false) 초안만 목록화 + QA 사유 배지 표시
-      - 선택한 초안을 .trash\<timestamp>\04_blog_drafts\<section>\ 로 이동 (하드 삭제 아님)
+      - 선택한 초안을 .trash\<timestamp>\<원래 폴더>\<section>\ 로 이동 (하드 삭제 아님)
       - 09_reports\cleanup_log.csv 에 이동 기록
 
     하지 않는 것:
@@ -27,14 +27,17 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
-Import-Module (Join-Path $PSScriptRoot "_local_core\LearningLog.LocalCore.psm1") -Force -DisableNameChecking
+Import-Module (Join-Path $PSScriptRoot "core\LearningLog.LocalCore.psm1") -Force -DisableNameChecking
 
 $RunDT     = Get-Date
 $RunTime   = $RunDT.ToString("yyyy-MM-dd HH:mm:ss")
 $Stamp     = $RunDT.ToString("yyyyMMdd_HHmmss")
 $null      = Ensure-LLRegistrySchema
-$DraftsDir = Get-LLPath "04_blog_drafts"
-$TrashDir  = Get-LLPath ".trash\$Stamp\04_blog_drafts"
+$DraftRoots = [ordered]@{
+    "04_blog_drafts"      = Get-LLPath "04_blog_drafts"
+    "05_ready_to_publish" = Get-LLPath "05_ready_to_publish"
+}
+$TrashRoot  = Get-LLPath ".trash\$Stamp"
 $LogPath   = Get-LLPath "09_reports\cleanup_log.csv"
 
 Write-Host ""
@@ -45,6 +48,7 @@ Write-Host "========================================" -ForegroundColor Cyan
 
 # registry topic/sid 인덱스 (approve 와 동일 패턴)
 $rows = @(Get-LLRegistryRows)
+$publishedNames = Get-LLPublishedNames
 $rowByTopic = @{}
 $rowBySid = @{}
 foreach ($r in $rows) {
@@ -60,10 +64,31 @@ function Resolve-DraftRow {
     return $null
 }
 
+function Get-CleanupRelativePath {
+    param([Parameter(Mandatory)][System.IO.FileInfo]$Draft)
+    $rootName = [string]$Draft.PSObject.Properties["CleanupRoot"].Value
+    $rootPath = [string]$Draft.PSObject.Properties["CleanupRootPath"].Value
+    $rel = $Draft.FullName.Substring($rootPath.Length) -replace '^[\\/]+', ''
+    return [pscustomobject]@{
+        RootName  = $rootName
+        Relative  = ($rel -replace '\\', '/')
+    }
+}
+
 # ── 차단 초안 수집 ──
-$allDrafts = @(Get-ChildItem -LiteralPath $DraftsDir -Recurse -Filter "*.md" -File | Sort-Object FullName)
+$allDrafts = @(
+    foreach ($entry in $DraftRoots.GetEnumerator()) {
+        if (-not (Test-Path -LiteralPath $entry.Value)) { continue }
+        $rootPath = (Resolve-Path -LiteralPath $entry.Value).Path
+        foreach ($draft in (Get-ChildItem -LiteralPath $entry.Value -Recurse -Filter "*.md" -File | Sort-Object FullName)) {
+            $draft | Add-Member -NotePropertyName CleanupRoot -NotePropertyValue $entry.Key -Force
+            $draft | Add-Member -NotePropertyName CleanupRootPath -NotePropertyValue $rootPath -Force
+            $draft
+        }
+    }
+)
 if ($allDrafts.Count -eq 0) {
-    Write-Host "  04_blog_drafts 에 초안이 없습니다." -ForegroundColor Yellow
+    Write-Host "  정리할 초안 폴더가 비어 있습니다." -ForegroundColor Yellow
     exit 0
 }
 
@@ -71,7 +96,14 @@ $blockedList = [System.Collections.Generic.List[object]]::new()
 foreach ($d in $allDrafts) {
     $c = Read-LLText $d.FullName
     $row = Resolve-DraftRow $d $c
-    $b = Get-LLDraftBadges -Content $c -Row $row
+    # 승인/발행된 글은 차단 대상이 아니다. 04_blog_drafts에 원본 초안이
+    # 남아 있어도 이력 보존용 사본이므로 절대 .trash로 이동하지 않는다.
+    $rowStatus = (Get-LLProp $row "status").ToLowerInvariant()
+    if ($rowStatus -in @("approved", "published") -or
+        (Test-LLDraftAlreadyPublished -Draft $d -Row $row -PublishedNames $publishedNames)) { continue }
+    $rel = $d.FullName.Replace($DraftsDir + "\", "").Replace("\", "/")
+    $section = ($rel -split "/")[0]
+    $b = Get-LLDraftBadges -Content $c -Row $row -Section $section
     if (-not $b.canApprove) {
         $why = ($b.badges | Where-Object { $_.cls -ne "ok" } | ForEach-Object { $_.text }) -join ", "
         $blockedList.Add([pscustomobject]@{ File = $d; Why = $why })
@@ -86,9 +118,11 @@ if ($blockedList.Count -eq 0) {
 }
 
 Write-Host ""
+Write-Host ("  차단 초안은 다음 위치로 이동됩니다: {0}" -f $TrashRoot) -ForegroundColor DarkGray
 Write-Host ("  --- 차단된 초안 {0} 개 ---" -f $blockedList.Count) -ForegroundColor Magenta
 for ($i = 0; $i -lt $blockedList.Count; $i++) {
-    $rel = $blockedList[$i].File.FullName.Replace($DraftsDir + "\", "").Replace("\", "/")
+    $pathInfo = Get-CleanupRelativePath -Draft $blockedList[$i].File
+    $rel = "$($pathInfo.RootName)/$($pathInfo.Relative)"
     Write-Host ("  [{0,2}] ⛔ {1}" -f ($i + 1), $rel) -ForegroundColor DarkGray
     Write-Host ("       사유: {0}" -f $blockedList[$i].Why) -ForegroundColor DarkGray
 }
@@ -128,12 +162,13 @@ $logEntries = [System.Collections.Generic.List[object]]::new()
 Write-Host ""
 foreach ($t in $targets) {
     $d = $t.File
-    $rel = $d.FullName.Replace($DraftsDir + "\", "")
-    $destPath = Join-Path $TrashDir $rel
+    $pathInfo = Get-CleanupRelativePath -Draft $d
+    $rel = "$($pathInfo.RootName)/$($pathInfo.Relative)"
+    $destPath = Join-Path $TrashRoot ($rel -replace '/', '\')
     $destDir = Split-Path -Parent $destPath
     if (-not (Test-Path -LiteralPath $destDir)) { New-Item -ItemType Directory -Path $destDir -Force | Out-Null }
     Move-Item -LiteralPath $d.FullName -Destination $destPath -Force
-    Write-Host ("  [이동] {0} -> .trash/{1}/04_blog_drafts/{2}" -f ($rel -replace '\\','/'), $Stamp, ($rel -replace '\\','/')) -ForegroundColor Yellow
+    Write-Host ("  [이동] {0} -> .trash/{1}/{2}" -f $rel, $Stamp, $rel) -ForegroundColor Yellow
     $logEntries.Add([pscustomobject]@{
         moved_at   = $RunTime
         file_name  = $d.Name
@@ -162,7 +197,7 @@ if ($logEntries.Count -gt 0) {
 Write-Host ""
 Write-Host "========================================" -ForegroundColor Cyan
 Write-Host ("  이동 완료: {0} 개 -> .trash\{1}\" -f $moved, $Stamp) -ForegroundColor Green
-Write-Host "  복구하려면 .trash 에서 04_blog_drafts 로 되돌리세요." -ForegroundColor DarkGray
+Write-Host "  복구하려면 .trash 에서 원래 폴더(04_blog_drafts 또는 05_ready_to_publish)로 되돌리세요." -ForegroundColor DarkGray
 Write-Host ("  로그: {0}" -f $LogPath) -ForegroundColor DarkGray
 Write-Host "========================================" -ForegroundColor Cyan
 exit 0

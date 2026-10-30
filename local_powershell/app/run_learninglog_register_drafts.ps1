@@ -33,7 +33,7 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
-Import-Module (Join-Path $PSScriptRoot "_local_core\LearningLog.LocalCore.psm1") -Force -DisableNameChecking
+Import-Module (Join-Path $PSScriptRoot "core\LearningLog.LocalCore.psm1") -Force -DisableNameChecking
 
 $RunDT   = Get-Date
 $RunTime = $RunDT.ToString("yyyy-MM-dd HH:mm:ss")
@@ -129,7 +129,7 @@ if ($SectionFilter) {
     Write-Host ("  미등록 초안 {0}개" -f $toRegister.Count) -ForegroundColor Yellow
 }
 foreach ($x in $toRegister) {
-    $iss = @(Get-LLDraftQualityIssues -Content $x.Content)
+    $iss = @(Get-LLDraftQualityIssues -Content $x.Content -Section $x.Section)
     $qa = if ($iss.Count -eq 0) { "QA PASS" } else { "QA 차단: " + ($iss -join ", ") }
     $col = if ($iss.Count -eq 0) { "Green" } else { "Red" }
     Write-Host ("  - {0}/{1}  [{2}]  ({3})" -f $x.Section, $x.Draft.Name, $qa, $x.Date) -ForegroundColor $col

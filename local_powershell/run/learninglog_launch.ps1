@@ -1,31 +1,31 @@
-#Requires -Version 7.0
+﻿#Requires -Version 7.0
 <#
 .SYNOPSIS
-    LearningLog 런처 — 파이프라인 메뉴 + Ollama 서버 관리
+    LearningLog 런처 — 파이프라인 메뉴 (LM Studio 전용)
 #>
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "SilentlyContinue"
-Import-Module (Join-Path $PSScriptRoot "_local_core\LearningLog.LocalCore.psm1") -Force -DisableNameChecking
+Import-Module (Join-Path $PSScriptRoot "..\app\core\LearningLog.LocalCore.psm1") -Force -DisableNameChecking
 
 $Root         = Get-LLRoot
 $RegistryPath = Get-LLRegistryPath
 $PrepDir      = Get-LLPath "09_reports\llm_prep"
-$OllamaExe    = "C:\Ollama-IPEX\ollama.exe"
-$OllamaBase   = "http://127.0.0.1:11434"
+$LMStudioBase = "http://127.0.0.1:1234"
+$LMStudioModel = "local-model"
 
 # ─────────────────────────────────────────────────────────
 # 헬퍼
 # ─────────────────────────────────────────────────────────
-function Test-OllamaRunning {
+function Test-LMStudioRunning {
     try {
-        $null = Invoke-RestMethod -Uri "$OllamaBase/" -Method Get -TimeoutSec 2 -ErrorAction Stop
+        $null = Invoke-RestMethod -Uri "$LMStudioBase/v1/models" -Method Get -TimeoutSec 2 -ErrorAction Stop
         return $true
     } catch { return $false }
 }
 
 function Get-PipelineStatus {
-    $s = @{ total = 0; pending = 0; immediate = 0; drafted = 0; published = 0; internal = 0; prep = 0; ollama = $false }
+    $s = @{ total = 0; pending = 0; immediate = 0; drafted = 0; published = 0; internal = 0; prep = 0 }
     if (Test-Path $RegistryPath) {
         $null = Ensure-LLRegistrySchema
         $rows = Get-LLRegistryRows
@@ -39,39 +39,17 @@ function Get-PipelineStatus {
     if (Test-Path $PrepDir) {
         $s.prep = @(Get-ChildItem $PrepDir -Filter "PREP_*.md" -File).Count
     }
-    $s.ollama = Test-OllamaRunning
     return $s
-}
-
-function Start-OllamaServer {
-    if (-not (Test-Path $OllamaExe)) {
-        Write-Host ""
-        Write-Host ("  [ERROR] ollama.exe 없음: {0}" -f $OllamaExe) -ForegroundColor Red
-        Start-Sleep -Seconds 2
-        return
-    }
-    Write-Host ""
-    Write-Host "  Ollama 서버 시작 중 ..." -ForegroundColor Yellow
-    Start-Process -FilePath $OllamaExe -ArgumentList "serve" -WindowStyle Normal
-    Write-Host "  잠시 대기 (3초) ..." -ForegroundColor DarkGray
-    Start-Sleep -Seconds 3
-    if (Test-OllamaRunning) {
-        Write-Host "  Ollama 서버 시작 완료  (127.0.0.1:11434)" -ForegroundColor Green
-    } else {
-        Write-Host "  아직 준비 중일 수 있습니다. 잠시 후 [3] extract 를 시도하세요." -ForegroundColor Yellow
-    }
-    Write-Host ""
-    Write-Host "  아무 키나 누르면 메뉴로 돌아갑니다..." -ForegroundColor DarkGray
-    $null = [Console]::ReadKey($true)
 }
 
 function Show-Menu {
     $s   = Get-PipelineStatus
     $now = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
 
-    $ollamaLabel = if ($s.ollama) { "ON  (127.0.0.1:11434)" } else { "OFF" }
-    $ollamaColor = if ($s.ollama) { "Green" } else { "Red" }
-    $prepColor   = if ($s.prep -gt 0) { "Yellow" } else { "DarkGray" }
+    $lmOn      = Test-LMStudioRunning
+    $lmLabel   = if ($lmOn) { "ON  (127.0.0.1:1234)" } else { "OFF" }
+    $lmColor   = if ($lmOn) { "Green" } else { "Red" }
+    $prepColor = if ($s.prep -gt 0) { "Yellow" } else { "DarkGray" }
 
     Clear-Host
     Write-Host ""
@@ -84,16 +62,15 @@ function Show-Menu {
     Write-Host ("  |  발행:{0,3} internal-only:{1,3}                 |" -f `
         $s.published, $s.internal) -ForegroundColor DarkGray
     Write-Host ("  |  PREP 패킷 대기: {0,2} 개                    |" -f $s.prep) -ForegroundColor $prepColor
-    Write-Host -NoNewline "  |  Ollama: " -ForegroundColor White
-    Write-Host -NoNewline $ollamaLabel -ForegroundColor $ollamaColor
-    $pad = 32 - $ollamaLabel.Length
+    Write-Host -NoNewline "  |  LM Studio: " -ForegroundColor White
+    Write-Host -NoNewline $lmLabel -ForegroundColor $lmColor
+    $pad = 29 - $lmLabel.Length
     Write-Host (" " * $pad + "|") -ForegroundColor White
     Write-Host "  +------------------------------------------+" -ForegroundColor Cyan
     Write-Host "  |                                          |" -ForegroundColor DarkGray
     Write-Host "  |  [1]  LearningLog    학습 기록/발행      |" -ForegroundColor Yellow
     Write-Host "  |  [2]  Projects       프로젝트 시리즈     |" -ForegroundColor Green
     Write-Host "  |  [3]  Daily          별도 회고 기록      |" -ForegroundColor Cyan
-    Write-Host "  |  [0]  Ollama 서버 시작                    |" -ForegroundColor $(if ($s.ollama) { "DarkGray" } else { "Yellow" })
     Write-Host "  |                                          |" -ForegroundColor DarkGray
     Write-Host "  |  [Q]  종료                               |" -ForegroundColor DarkGray
     Write-Host "  |                                          |" -ForegroundColor DarkGray
@@ -108,9 +85,9 @@ function Show-LearningLogMenu {
     Write-Host "  +------------------------------------------+" -ForegroundColor Cyan
     Write-Host "  |       LearningLog                        |" -ForegroundColor Cyan
     Write-Host "  +------------------------------------------+" -ForegroundColor Cyan
-    Write-Host "  |  [1]  오늘 자동 처리  새 파일→학습노트    |" -ForegroundColor Cyan
+    Write-Host "  |  [1]  자동 생성+미리보기  발행 전 확인    |" -ForegroundColor Cyan
     Write-Host "  |  [2]  단계별 처리    등록/준비/LLM 노트   |" -ForegroundColor Magenta
-    Write-Host "  |  [3]  블로그/발행    합본→미리보기→발행  |" -ForegroundColor Yellow
+    Write-Host "  |  [3]  블로그/발행    수리→승인→발행      |" -ForegroundColor Yellow
     Write-Host "  |  [4]  점검/관리      현황/리뷰/정리/내림  |" -ForegroundColor Green
     Write-Host "  |                                          |" -ForegroundColor DarkGray
     Write-Host "  |  [Q]  뒤로                               |" -ForegroundColor DarkGray
@@ -128,7 +105,7 @@ function Show-ProcessMenu {
     Write-Host "  |  [1]  새 파일 등록      inbox → registry |" -ForegroundColor Green
     Write-Host "  |  [2]  LLM 준비 패킷     registry → PREP  |" -ForegroundColor Yellow
     Write-Host "  |  [3]  LLM 학습노트      PREP → working   |" -ForegroundColor Magenta
-    Write-Host "  |  [7]  오늘 자동 처리    1 → 2 → 3        |" -ForegroundColor Cyan
+    Write-Host "  |  [7]  자동 생성+미리보기  1→2→3→초안     |" -ForegroundColor Cyan
     Write-Host "  |                                          |" -ForegroundColor DarkGray
     Write-Host "  |  [Q]  뒤로                               |" -ForegroundColor DarkGray
     Write-Host "  +------------------------------------------+" -ForegroundColor Cyan
@@ -142,12 +119,13 @@ function Show-BlogMenu {
     Write-Host "  +------------------------------------------+" -ForegroundColor Cyan
     Write-Host "  |       Blog / Publish                     |" -ForegroundColor Cyan
     Write-Host "  +------------------------------------------+" -ForegroundColor Cyan
-    Write-Host "  |  [1]  학습 합본 생성     working → daily |" -ForegroundColor Yellow
-    Write-Host "  |       AM/PM 학습노트 블로그 초안 생성     |" -ForegroundColor DarkGray
-    Write-Host "  |  [2]  초안 등록          drafts→registry |" -ForegroundColor Green
-    Write-Host "  |  [3]  미리보기 열기      preview page    |" -ForegroundColor Cyan
-    Write-Host "  |  [4]  승인본 이동        draft → ready   |" -ForegroundColor Yellow
-    Write-Host "  |  [5]  발행하기           ready → blog    |" -ForegroundColor Green
+    Write-Host "  |  [1]  자동 생성+미리보기  draft→preview  |" -ForegroundColor Cyan
+    Write-Host "  |  [2]  미리보기 열기       통과/패치/차단 |" -ForegroundColor Yellow
+    Write-Host "  |  [3]  자동 패치           QA reason fix  |" -ForegroundColor Magenta
+    Write-Host "  |  [4]  승인본 이동         draft → ready  |" -ForegroundColor Yellow
+    Write-Host "  |  [5]  발행하기            ready → blog   |" -ForegroundColor Green
+    Write-Host "  |  [6]  패치 백업 복구      patch backup   |" -ForegroundColor DarkYellow
+    Write-Host "  |  [7]  과거 초안 패치      backlog patch  |" -ForegroundColor DarkGray
     Write-Host "  |                                          |" -ForegroundColor DarkGray
     Write-Host "  |  [Q]  뒤로                               |" -ForegroundColor DarkGray
     Write-Host "  +------------------------------------------+" -ForegroundColor Cyan
@@ -161,7 +139,8 @@ function Show-DailyMenu {
     Write-Host "  +------------------------------------------+" -ForegroundColor Cyan
     Write-Host "  |       Daily / Personal Log              |" -ForegroundColor Cyan
     Write-Host "  +------------------------------------------+" -ForegroundColor Cyan
-    Write-Host "  |  [1]  데일리 로그 작성   일상/회고 기록  |" -ForegroundColor Cyan
+    Write-Host "  |  [1]  로컬 데일리 로그   발행하지 않음    |" -ForegroundColor Cyan
+    Write-Host "  |  [2]  개인 기록 글       사진/음악 블로그 |" -ForegroundColor Cyan
     Write-Host "  |                                          |" -ForegroundColor DarkGray
     Write-Host "  |  [Q]  뒤로                               |" -ForegroundColor DarkGray
     Write-Host "  +------------------------------------------+" -ForegroundColor Cyan
@@ -238,12 +217,13 @@ function Run-BlogMenu {
         Show-BlogMenu
         $key = [Console]::ReadKey($true)
         switch ($key.KeyChar.ToString().ToUpper()) {
-            "1" { Run-Script "run_learninglog_blogdraft.ps1" }
-            "2" { Run-Script "run_learninglog_register_drafts.ps1" @("-Section", "learning") }
-            "3" { Run-Script "run_learninglog_preview.ps1" @("-Section", "learning") }
+            "1" { Run-AllAuto }
+            "2" { Run-Script "run_learninglog_preview.ps1" @("-Section", "learning") }
+            "3" { Run-Script "run_learninglog_repair_drafts.ps1" @("-Section", "learning", "-Mode", "auto") }
             "4" { Run-Script "run_learninglog_approve.ps1" @("-Section", "learning") }
             "5" { Run-Script "run_learninglog_publish.ps1" @("-Section", "learning") }
-            "6" { Run-Script "run_learninglog_publish.ps1" @("-Section", "learning") }
+            "6" { Run-Script "run_learninglog_repair_drafts.ps1" @("-RestoreLatestBackup") }
+            "7" { Run-Script "run_learninglog_repair_drafts.ps1" @("-Section", "learning", "-IncludeBacklog", "-Mode", "auto") }
             "Q" { return }
         }
     }
@@ -255,6 +235,7 @@ function Run-DailyMenu {
         $key = [Console]::ReadKey($true)
         switch ($key.KeyChar.ToString().ToUpper()) {
             "1" { Run-Script "run_learninglog_daily.ps1" }
+            "2" { Run-Script "run_learninglog_daily_post.ps1" }
             "Q" { return }
         }
     }
@@ -295,7 +276,7 @@ function Run-Script {
         [string]$ScriptName,
         [string[]]$ScriptArgs = @()
     )
-    $path = Join-Path $Root $ScriptName
+    $path = Join-Path $PSScriptRoot $ScriptName
     if (-not (Test-Path $path)) {
         Write-Host ""
         Write-Host ("  [ERROR] 스크립트 없음: {0}" -f $ScriptName) -ForegroundColor Red
@@ -312,35 +293,34 @@ function Run-Script {
 }
 
 function Run-Extract {
-    # extract 전에 Ollama 상태 확인
-    if (-not (Test-OllamaRunning)) {
-        Write-Host ""
-        Write-Host "  Ollama 서버가 꺼져 있습니다." -ForegroundColor Yellow
-        Write-Host ("  [0] 을 눌러 먼저 Ollama 를 시작하거나,") -ForegroundColor Yellow
-        Write-Host ("  Ollama 서버를 켠 뒤 다시 [3] 을 누르세요.") -ForegroundColor Yellow
-        Write-Host ""
-        Write-Host ("  ollama.exe: {0}" -f $OllamaExe) -ForegroundColor DarkGray
-        Write-Host ""
-        Write-Host "  아무 키나 누르면 메뉴로 돌아갑니다..." -ForegroundColor DarkGray
-        $null = [Console]::ReadKey($true)
+    # LM Studio 전용 경로.
+    if (Test-LMStudioRunning) {
+        Run-Script "run_learninglog_extract.ps1" @("-Engine", "lm", "-LMStudioModel", $LMStudioModel)
         return
     }
-    Run-Script "run_learninglog_extract.ps1"
+    Write-Host ""
+    Write-Host "  LM Studio(:1234) 서버가 꺼져 있습니다." -ForegroundColor Yellow
+    Write-Host ("  LM Studio에서 {0} 모델을 Load/Start 한 뒤 다시 실행하세요." -f $LMStudioModel) -ForegroundColor Yellow
+    Write-Host ""
+    Write-Host "  아무 키나 누르면 메뉴로 돌아갑니다..." -ForegroundColor DarkGray
+    $null = [Console]::ReadKey($true)
 }
 
 function Run-AllAuto {
     Write-Host ""
     Write-Host "  ============================================" -ForegroundColor Cyan
-    Write-Host "   오늘 처리 실행  [1 -> 2 -> 3]" -ForegroundColor Cyan
-    Write-Host "   intake -> prep -> extract/working" -ForegroundColor Cyan
-    Write-Host "   => MODE 3 working_note 까지만. 초안/승인/미리보기는 [B]에서 수동." -ForegroundColor Cyan
+    Write-Host "   오늘 새 로그 자동 생성+미리보기" -ForegroundColor Cyan
+    Write-Host "   intake -> prep -> extract -> blogdraft -> register -> preview" -ForegroundColor Cyan
+    Write-Host "   => 승인/발행은 하지 않습니다. preview 에서 통과/수리/차단을 고르세요." -ForegroundColor Cyan
     Write-Host "  ============================================" -ForegroundColor Cyan
 
-    # Ollama 필수 확인
-    if (-not (Test-OllamaRunning)) {
+    # LM Studio 전용. 서버가 꺼져 있으면 중단한다.
+    $autoEngineArgs = @("-Engine", "lm", "-LMStudioModel", $LMStudioModel)
+    $autoDraftArgs = @("-Engine", "lm", "-LMStudioModel", $LMStudioModel, "-TodayOnly")
+    if (-not (Test-LMStudioRunning)) {
         Write-Host ""
-        Write-Host "  [중단] Ollama 서버가 꺼져 있습니다." -ForegroundColor Red
-        Write-Host "  [0] 으로 Ollama 를 먼저 시작한 후 [7] 을 다시 누르세요." -ForegroundColor Yellow
+        Write-Host "  [중단] LM Studio 서버가 꺼져 있습니다." -ForegroundColor Red
+        Write-Host "  LM Studio에서 모델을 Load하고 서버를 Start한 뒤 다시 실행하세요." -ForegroundColor Yellow
         Write-Host ""
         Write-Host "  아무 키나 누르면 메뉴로 돌아갑니다..." -ForegroundColor DarkGray
         $null = [Console]::ReadKey($true)
@@ -348,7 +328,8 @@ function Run-AllAuto {
     }
 
     Write-Host ""
-    Write-Host "  새 파일 등록, PREP 생성, LLM 처리(MODE 3)까지만 자동 진행됩니다." -ForegroundColor Yellow
+    Write-Host "  새 파일 등록부터 초안 미리보기까지 자동 진행됩니다." -ForegroundColor Yellow
+    Write-Host "  05_ready_to_publish, blog-source, git 작업은 건드리지 않습니다." -ForegroundColor Yellow
     Write-Host "  시작할까요? [Y] 시작 / 다른 키 취소" -ForegroundColor White -NoNewline
     $k = [Console]::ReadKey($true)
     if ($k.KeyChar.ToString().ToUpper() -ne "Y") {
@@ -361,14 +342,17 @@ function Run-AllAuto {
     $steps = @(
         @{ name = "[1] intake    새 파일 등록";              script = "run_learninglog_intake.ps1" },
         @{ name = "[2] prep      LLM 패킷 조립";            script = "run_learninglog_prep.ps1" },
-        @{ name = "[3] extract   LLM 처리 (분류/추출/노트)"; script = "run_learninglog_extract.ps1" }
+        @{ name = "[3] extract   LLM 처리 (분류/추출/노트)"; script = "run_learninglog_extract.ps1"; args = $autoEngineArgs },
+        @{ name = "[4] blogdraft 오늘 초안/합본 생성";       script = "run_learninglog_blogdraft.ps1"; args = $autoDraftArgs },
+        @{ name = "[5] register  초안 레지스트리 등록";      script = "run_learninglog_register_drafts.ps1"; args = @("-Section", "learning") },
+        @{ name = "[6] preview   미리보기/통과/수리/차단";   script = "run_learninglog_preview.ps1"; args = @("-Section", "learning") }
     )
 
     foreach ($step in $steps) {
         Write-Host ""
         Write-Host ("  ── {0} ──" -f $step.name) -ForegroundColor Cyan
         Write-Host ""
-        $p = Join-Path $Root $step.script
+        $p = Join-Path $PSScriptRoot $step.script
         $stepArgs = @(); if ($step.ContainsKey('args')) { $stepArgs = $step.args }
         if (Test-Path $p) {
             & pwsh -ExecutionPolicy Bypass -File $p @stepArgs
@@ -389,8 +373,8 @@ function Run-AllAuto {
     Write-Host ""
     Write-Host "  ============================================" -ForegroundColor Green
     Write-Host "   *** 오늘 처리 완료! ***" -ForegroundColor Green
-    Write-Host "   working_note 까지 생성됨. 학습 블로그는 [3] 메뉴에서 진행하세요." -ForegroundColor Green
-    Write-Host "   프로젝트 시리즈는 [2], 일상 데일리 로그는 [3] 메뉴에서 따로 작성하세요." -ForegroundColor Green
+    Write-Host "   미리보기까지 완료됨. 통과한 글만 승인본으로 이동됩니다." -ForegroundColor Green
+    Write-Host "   발행은 Blog / Publish 메뉴의 [5]에서 따로 실행하세요." -ForegroundColor Green
     Write-Host "  ============================================" -ForegroundColor Green
     Write-Host ""
     Write-Host "  아무 키나 누르면 메뉴로 돌아갑니다..." -ForegroundColor DarkGray
@@ -406,7 +390,6 @@ while ($true) {
     $ch  = $key.KeyChar.ToString().ToUpper()
 
     switch ($ch) {
-        "0" { Start-OllamaServer }
         "1" { Run-LearningLogMenu }
         "2" { Run-ProjectsMenu }
         "3" { Run-DailyMenu }

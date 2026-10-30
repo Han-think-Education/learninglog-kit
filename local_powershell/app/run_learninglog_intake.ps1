@@ -12,7 +12,7 @@
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
-Import-Module (Join-Path $PSScriptRoot "_local_core\LearningLog.LocalCore.psm1") -Force -DisableNameChecking
+Import-Module (Join-Path $PSScriptRoot "core\LearningLog.LocalCore.psm1") -Force -DisableNameChecking
 
 $Root = Get-LLRoot
 $InboxRoot = Get-LLPath "00_inbox"
@@ -24,8 +24,12 @@ $Today = $RunDT.ToString("yyyyMMdd")
 $TodayDisplay = $RunDT.ToString("yyyy-MM-dd")
 $TimeStamp = $RunDT.ToString("yyyy-MM-dd_HHmmss")
 
-$SubFolders = @("lectures", "chat_exports", "personal_notes", "screenshots", "web_notes")
-$AllowedExtensions = @(".pdf", ".ipynb", ".md", ".txt", ".zip", ".png", ".jpg", ".jpeg", ".webp")
+$SubFolders = @("lectures", "chat_exports", "personal_notes", "dev_notes", "screenshots", "web_notes")
+# index 대상 = 학습로그(노트) 본문만. PDF/이미지/zip/노트북 등 비노트 파일은 등록하지 않는다
+# (어차피 LLM 처리에서 제외되는 것들 = index 잡음). 필요하면 확장자를 다시 추가하면 된다.
+$AllowedExtensions = @(".md", ".txt")
+# 노트가 아닌 리포지토리/시스템 잡파일은 파일명(확장자 제외)으로도 제외한다.
+$IgnoreBaseNames = @("readme", "read_me", "manifest", "agents", "claude", "changelog", "license", "contributing")
 
 Write-Host ""
 Write-Host "========================================" -ForegroundColor Cyan
@@ -56,8 +60,13 @@ $candidates = [System.Collections.Generic.List[System.IO.FileInfo]]::new()
 foreach ($folder in $SubFolders) {
     $path = Join-Path $InboxRoot $folder
     if (Test-Path -LiteralPath $path) {
-        Get-ChildItem -LiteralPath $path -File -ErrorAction SilentlyContinue |
-            Where-Object { -not $_.Name.StartsWith(".") -and $_.Extension.ToLowerInvariant() -in $AllowedExtensions } |
+        # 개발 자료만 한 묶음 폴더를 허용. 수업 입력의 기존 평면 스캔은 그대로.
+        Get-ChildItem -LiteralPath $path -File -Recurse:($folder -eq 'dev_notes') -ErrorAction SilentlyContinue |
+            Where-Object {
+                -not $_.Name.StartsWith(".") -and
+                ($_.Extension.ToLowerInvariant() -in $AllowedExtensions) -and
+                ($_.BaseName.ToLowerInvariant() -notin $IgnoreBaseNames)
+            } |
             ForEach-Object { $candidates.Add($_) }
     }
 }
@@ -84,17 +93,17 @@ for ($i = 0; $i -lt $candidates.Count; $i++) {
     $extCounts[$ext]++
 
     try {
+        # 이미 등록된 경로는 해시 계산(파일 전체 읽기) 전에 즉시 skip. 과거 것 재해시·콘솔 잡음 제거.
+        if ($registeredPaths.Contains($rel.Normalize([System.Text.NormalizationForm]::FormC))) {
+            $skipped.Add("$rel already_registered")
+            continue
+        }
+        if ($subfolder -eq 'dev_notes') { $null = Resolve-LLDevNotePath $rel }
         $meta = Get-LLSourceMetadata -File $file -InboxSubfolder $subfolder
         if (-not $categoryCounts.ContainsKey($meta.source_category)) { $categoryCounts[$meta.source_category] = 0 }
         $categoryCounts[$meta.source_category]++
 
-        if ($registeredPaths.Contains($rel)) {
-            Write-Host ("  [{0}/{1}] skipped {2} (already registered)" -f $n, $candidates.Count, $rel) -ForegroundColor DarkGray
-            $skipped.Add("$rel already_registered")
-            continue
-        }
         if ($meta.hash -and $registeredHashes.Contains($meta.hash.ToLowerInvariant())) {
-            Write-Host ("  [{0}/{1}] duplicate skipped {2} hash={3}" -f $n, $candidates.Count, $rel, $meta.hash.Substring(0, [Math]::Min(12, $meta.hash.Length))) -ForegroundColor DarkGray
             $duplicates.Add("$rel hash=$($meta.hash)")
             continue
         }

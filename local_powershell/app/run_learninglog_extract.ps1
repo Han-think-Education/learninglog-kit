@@ -1,4 +1,4 @@
-#Requires -Version 7.0
+﻿#Requires -Version 7.0
 <#
 .SYNOPSIS
     LearningLog Phase 3 Extract — Ollama 호출로 extract + working_note 자동 생성
@@ -41,14 +41,18 @@
 
 param(
     [string]$SourceId      = "",
-    [int]$NumCtx           = 8192,  # Ollama 실행 컨텍스트. GPU VRAM 부족 시 4096/2048 로 낮춤
+    [int]$NumCtx           = 8192,  # 실행 컨텍스트. GPU VRAM 부족 시 4096/2048 로 낮춤
     [int]$MaxCharsPerChunk = 0,     # 0 = NumCtx 에서 자동 계산
+    [ValidateSet("lm","ollama")]
+    [string]$Engine         = "lm",
+    [string]$LMStudioBase   = "http://127.0.0.1:1234",
+    [string]$LMStudioModel  = "local-model",
     [switch]$IncludeDraft
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
-Import-Module (Join-Path $PSScriptRoot "_local_core\LearningLog.LocalCore.psm1") -Force -DisableNameChecking
+Import-Module (Join-Path $PSScriptRoot "core\LearningLog.LocalCore.psm1") -Force -DisableNameChecking
 
 # ─────────────────────────────────────────────────────────
 # 경로 설정
@@ -62,6 +66,7 @@ $BackupDir    = Get-LLPath "07_archive\backups"
 $ExtractedDir = Get-LLPath "02_extracted\concept_extracts"
 $WorkingDir   = Get-LLPath "03_working_notes\daily_logs"
 $OllamaBase   = "http://127.0.0.1:11434"
+$UseLM        = $Engine -ieq "lm"
 
 $RunDT     = Get-Date
 $RunTime   = $RunDT.ToString("yyyy-MM-dd HH:mm:ss")
@@ -71,9 +76,9 @@ $TimeStamp = $RunDT.ToString("yyyyMMdd_HHmmss")
 # ─────────────────────────────────────────────────────────
 # 모델 설정
 # ─────────────────────────────────────────────────────────
-$ModelClassify = "exaone3.5:7.8b"
-$ModelExtract  = "exaone3.5:7.8b"
-$ModelWorking  = "exaone3.5:7.8b"
+$ModelClassify = if ($UseLM) { $LMStudioModel } else { "exaone3.5:7.8b" }
+$ModelExtract  = if ($UseLM) { $LMStudioModel } else { "exaone3.5:7.8b" }
+$ModelWorking  = if ($UseLM) { $LMStudioModel } else { "exaone3.5:7.8b" }
 
 # ─────────────────────────────────────────────────────────
 # 배너
@@ -85,17 +90,34 @@ Write-Host "  $RunTime" -ForegroundColor Cyan
 Write-Host "========================================" -ForegroundColor Cyan
 
 # ─────────────────────────────────────────────────────────
-# 1. Ollama 헬스체크
+# 1. LLM 엔드포인트 헬스체크
 # ─────────────────────────────────────────────────────────
 Write-Host ""
-Write-Host "  Ollama 헬스체크 ... " -ForegroundColor White -NoNewline
+Write-Host ("  {0} 헬스체크 ... " -f $(if ($UseLM) { "LM Studio" } else { "Ollama" })) -ForegroundColor White -NoNewline
 try {
-    $null = Invoke-RestMethod -Uri "$OllamaBase/" -Method Get -TimeoutSec 5 -ErrorAction Stop
-    Write-Host "OK ($OllamaBase)" -ForegroundColor Green
+    if ($UseLM) {
+        $null = Invoke-RestMethod -Uri "$LMStudioBase/v1/models" -Method Get -TimeoutSec 5 -ErrorAction Stop
+        Write-Host "OK ($LMStudioBase)" -ForegroundColor Green
+        # 생성 전에 모델 ID가 실제 로드 목록에 있는지 확인 — 잘못된 ID면 긴 재시도 대신 즉시 실패.
+        $mc = Test-LLMModelAvailable -Model $LMStudioModel -LMStudioBase $LMStudioBase
+        if (-not $mc.ok) {
+            Write-Host ("  [ERROR] 모델 '{0}' 이(가) LM Studio에 로드돼 있지 않습니다. Load 후 다시 실행하세요." -f $LMStudioModel) -ForegroundColor Red
+            if ($mc.available.Count -gt 0) { Write-Host ("  현재 로드됨: {0}" -f ($mc.available -join ", ")) -ForegroundColor DarkGray }
+            exit 1
+        }
+        Write-Host ("  모델 확인: {0}" -f $LMStudioModel) -ForegroundColor Green
+    } else {
+        $null = Invoke-RestMethod -Uri "$OllamaBase/" -Method Get -TimeoutSec 5 -ErrorAction Stop
+        Write-Host "OK ($OllamaBase)" -ForegroundColor Green
+    }
 } catch {
     Write-Host "FAIL" -ForegroundColor Red
-    Write-Host "  [ERROR] Ollama 미실행. $OllamaBase 를 먼저 시작하세요." -ForegroundColor Red
-    Write-Host "  힌트: ollama serve  또는  Ollama 앱 실행" -ForegroundColor Yellow
+    if ($UseLM) {
+        Write-Host "  [ERROR] LM Studio 서버가 없습니다. 127.0.0.1:1234에서 서버를 켜고 모델을 로드하세요." -ForegroundColor Red
+    } else {
+        Write-Host "  [ERROR] Ollama 미실행. $OllamaBase 를 먼저 시작하세요." -ForegroundColor Red
+        Write-Host "  힌트: ollama serve 또는 Ollama 앱 실행" -ForegroundColor Yellow
+    }
     exit 1
 }
 
@@ -146,8 +168,43 @@ foreach ($d in @($ProcessedDir, $ExtractedDir, $WorkingDir)) {
 }
 
 # ─────────────────────────────────────────────────────────
-# 헬퍼: Ollama 생성 호출
+# 헬퍼: LM Studio/OpenAI 호환 생성 호출
 # ─────────────────────────────────────────────────────────
+function Invoke-LMStudioGenerate {
+    param(
+        [string]$Model,
+        [string]$Prompt,
+        [int]$NumPredict = 512,
+        [int]$CtxSize    = 8192
+    )
+    $bodyObj = [ordered]@{
+        model = $Model
+        messages = @(
+            [ordered]@{ role = "user"; content = $Prompt }
+        )
+        stream = $false
+        temperature = 0.2
+        max_tokens = $NumPredict
+    }
+    $bodyJson = $bodyObj | ConvertTo-Json -Depth 6 -Compress
+    $bytes = [Text.Encoding]::UTF8.GetBytes($bodyJson)
+    # 일시적 blip(순간 400/타임아웃/빈응답) 흡수용 재시도. 지속 실패는 그대로 throw.
+    $maxAttempts = 3
+    for ($attempt = 1; $attempt -le $maxAttempts; $attempt++) {
+        try {
+            $resp = Invoke-RestMethod -Uri "$LMStudioBase/v1/chat/completions" -Method Post `
+                -Body $bytes -ContentType "application/json; charset=utf-8" -TimeoutSec 600 -ErrorAction Stop
+            $text = [string]$resp.choices[0].message.content
+            if ([string]::IsNullOrWhiteSpace($text)) { throw "LM Studio returned an empty response." }
+            return $text
+        } catch {
+            if ($attempt -ge $maxAttempts) { throw }
+            Write-Host ("      [LM 재시도 {0}/{1}] {2}" -f $attempt, $maxAttempts, $_.Exception.Message) -ForegroundColor DarkYellow
+            Start-Sleep -Seconds ($attempt * 2)
+        }
+    }
+}
+
 function Invoke-OllamaGenerate {
     param(
         [string]$Model,
@@ -155,6 +212,9 @@ function Invoke-OllamaGenerate {
         [int]$NumPredict = 512,   # 출력 토큰 제한 — 입력 여유 확보
         [int]$CtxSize    = 8192   # Ollama 실행 컨텍스트 명시 (스크립트 $NumCtx 와 일치)
     )
+    if ($UseLM) {
+        return Invoke-LMStudioGenerate -Model $Model -Prompt $Prompt -NumPredict $NumPredict -CtxSize $CtxSize
+    }
     $bodyObj = [ordered]@{
         model   = $Model
         prompt  = $Prompt
@@ -270,6 +330,7 @@ function Invoke-OllamaChunked {
     $partials = [System.Collections.Generic.List[string]]::new()
     for ($i = 0; $i -lt $chunks.Count; $i++) {
         $chunkInstruction = $Instruction + "`n(파트 $($i+1)/$($chunks.Count) — 이 부분만 처리)"
+        Set-LLJobItem -Detail ("{0} · 파트 {1}/{2}" -f $script:LHStepLabel, ($i + 1), $chunks.Count)
         Write-Host ("      파트 $($i+1)/$($chunks.Count) " ) -ForegroundColor DarkGray -NoNewline
         $partial = Invoke-OllamaGenerate -Model $Model -Prompt ($chunkInstruction + "`n---`n" + $chunks[$i]) -CtxSize $NumCtx
         $partials.Add($partial)
@@ -353,6 +414,9 @@ $doneCount = 0
 $skipCount = 0
 $errCount  = 0
 $reportRows = [System.Collections.Generic.List[string]]::new()
+$pktTotal = @($packets).Count     # 컨트롤센터 진행바용(LH_JOB_PROGRESS 켜진 실행에서만 기록)
+$pktIdx = 0
+$script:LHStepLabel = ""
 
 foreach ($pkt in $packets) {
 
@@ -366,6 +430,7 @@ foreach ($pkt in $packets) {
     $stype  = ""
     $scat   = ""
     $ftype  = ""
+    $sourcePath = ""
 
     foreach ($ln in $pLines) {
         if     ($ln -match '^\| source_id \| `(.+)` \|')     { $sid    = $Matches[1].Trim() }
@@ -374,6 +439,7 @@ foreach ($pkt in $packets) {
         elseif ($ln -match '^\| source_type \| (.+) \|')     { $stype  = $Matches[1].Trim() }
         elseif ($ln -match '^\| source_category \| (.+) \|') { $scat   = $Matches[1].Trim() }
         elseif ($ln -match '^\| file_type \| (.+) \|')       { $ftype  = $Matches[1].Trim() }
+        elseif ($ln -match '^\| source_path \| `(.+)` \|')    { $sourcePath = $Matches[1].Trim() }
     }
 
     # 소스 본문 추출
@@ -387,6 +453,8 @@ foreach ($pkt in $packets) {
 
     Write-Host ""
     Write-Host ("  [{0}] {1}" -f $sid, $topic) -ForegroundColor Magenta
+    $pktIdx++
+    Set-LLJobItem -Done ($pktIdx - 1) -Total $pktTotal -Item $topic -Detail "분석 준비" -SubDone 0 -SubTotal 3
 
     # ── 4-2. 안전 필터 ──────────────────────────────────────
     $packetMeta = [pscustomobject]@{
@@ -408,6 +476,14 @@ foreach ($pkt in $packets) {
         continue
     }
 
+    # 늦게 처리한 personal note도 실행일이 아닌 원본 작성일로 묶는다.
+    $noteDate = $TodayStr
+    if ($sourcePath -match '(?<!\d)(\d{4}-\d{2}-\d{2})(?!\d)') {
+        $noteDate = $Matches[1]
+    } elseif ($body -match '(?m)^\s*(?:-\s*)?date:\s*(\d{4}-\d{2}-\d{2})\s*$') {
+        $noteDate = $Matches[1]
+    }
+
     $chunkPolicy = Get-LLProcessingPolicy -SourceType $stype -SourceCategory $scat -FileType $ftype -ManualChunkChars $MaxCharsPerChunk
     $ChunkClassify = $chunkPolicy.ChunkChars
     $ChunkExtract  = $chunkPolicy.ChunkChars
@@ -419,12 +495,13 @@ foreach ($pkt in $packets) {
     # ── 4-3. 출력 경로 ──────────────────────────────────────
     $classifyPath = Join-Path $PrepDir ("classify_{0}.json" -f $sid)
     $extractPath  = Join-Path $ExtractedDir ("{0}_{1}_extract.md" -f $sid, $topic)
-    $workingPath  = Join-Path $WorkingDir ("{0}_{1}.md" -f $TodayStr, $topic)
+    $workingPath  = Join-Path $WorkingDir ("{0}_{1}.md" -f $noteDate, $topic)
     $processedPkt = Join-Path $ProcessedDir $pkt.Name
 
     $modeErrors = [System.Collections.Generic.List[string]]::new()
 
     # ── MODE 1: classify ────────────────────────────────────
+    $script:LHStepLabel = "1/3 분류"; Set-LLJobItem -SubDone 0 -Detail $script:LHStepLabel
     if (Test-Path $classifyPath) {
         Write-Host "    MODE 1 classify  ... SKIP (이미 존재)" -ForegroundColor DarkGray
     } else {
@@ -449,6 +526,7 @@ foreach ($pkt in $packets) {
     }
 
     # ── MODE 2: extract ─────────────────────────────────────
+    $script:LHStepLabel = "2/3 개념 추출"; Set-LLJobItem -SubDone 1 -Detail $script:LHStepLabel
     if (Test-Path $extractPath) {
         Write-Host "    MODE 2 extract   ... SKIP (이미 존재)" -ForegroundColor DarkGray
     } else {
@@ -473,6 +551,7 @@ foreach ($pkt in $packets) {
     }
 
     # ── MODE 3: working_note ────────────────────────────────
+    $script:LHStepLabel = "3/3 워킹노트 작성"; Set-LLJobItem -SubDone 2 -Detail $script:LHStepLabel
     if (Test-Path $workingPath) {
         Write-Host "    MODE 3 working   ... SKIP (이미 존재)" -ForegroundColor DarkGray
     } else {
@@ -484,7 +563,7 @@ foreach ($pkt in $packets) {
                                   "포함 항목: 무엇이 헷갈렸나 / 정리된 이해 / 실습 예시 / 초보자 키워드(의미+검색어) / 내 프로젝트 연결 / 다음 복습 주제"
             $workingResult = Invoke-OllamaChunked -Model $ModelWorking -Instruction $workingInstruction -Body $body -MaxChars $ChunkWorking -DirectChars $DirectChars -OverlapChars $OverlapChars
 
-            $workingFM = "---`nsource_id: $sid`nnote_date: $TodayStr`nmodel: $ModelWorking`nmode: working_note`n---`n`n"
+            $workingFM = "---`nsource_id: $sid`nnote_date: $noteDate`nmodel: $ModelWorking`nmode: working_note`n---`n`n"
             [System.IO.File]::WriteAllText($workingPath, ($workingFM + $workingResult), [System.Text.Encoding]::UTF8)
 
             $null = Update-RegistryStatus -Sid $sid -NewStatus "working"
@@ -550,7 +629,7 @@ foreach ($pkt in $packets) {
                     "- 코드 블록은 반드시 펜스를 열고 닫는다. 출력/결과 주석은 실제 값으로 채운다. 빈 '# 출력:' 금지`n" +
                     "- '왜 썼나 / 배운 것 / 헷갈린 것' 처럼 슬래시로 합친 제목을 만들지 말 것`n`n" +
                     "출력 형식 (front matter 로 시작):`n" +
-                    "---`ntitle: `"제목`"`ndate: $TodayStr`ndraft: true`n" +
+                    "---`ntitle: `"제목`"`ndate: $noteDate`ndraft: true`n" +
                     "categories: [`"`"]`ntags: []`ndescription: `"설명`"`n---`n`n" +
                     "## 1. 첫 번째 개념명`n### 왜 이걸 보게 됐나`n...`n### 내가 헷갈린 지점`n...`n" +
                     "### 시도한 코드 / 예시`n...`n### 결과와 해석`n...`n### 정리된 이해`n...`n`n" +
@@ -602,6 +681,8 @@ foreach ($pkt in $packets) {
         $reportRows.Add(("| ``{0}`` | {1} | ERROR: {2} | - | - |" -f $sid, $topic, $errMsg))
     }
 }
+
+Set-LLJobItem -Done $pktTotal -Total $pktTotal -Item "" -Detail "워킹노트 변환 완료" -SubDone 0 -SubTotal 0
 
 # ─────────────────────────────────────────────────────────
 # 5. 실행 리포트 생성

@@ -13,9 +13,17 @@
 
 | 킷 | 버전 | 위치 | 용도 |
 |----|------|------|------|
-| LearningLog Python/Web UI | 0.5.4 | `src/learninglog/` | Python 패키지와 브라우저 UI |
-| LearningLog Windows Runner | 0.5.4 | `local_powershell/` | Windows PowerShell 로컬 운영판 |
+| LearningLog Python/Web UI | 0.6.0 | `src/learninglog/` | Python 패키지와 브라우저 UI |
+| LearningLog Windows Runner | 0.6.0 | `local_powershell/` | Windows PowerShell 로컬 운영판 |
 | DailyLog Kit | 1.2 | `dailylog_kit/` | 하루 회고 Markdown 생성기 |
+
+### v0.6.0 변경점 (2026-10)
+
+- Windows Runner 폴더 구조 정리: `run/`(진입점) + `app/`(구현) + `app/core/`(공용 모듈) + `08_templates/`
+- 발행 안전장치 모듈 추가: `LearningLog.PublishGitGuard`, `LearningLog.PublishPreflight`
+- 초안 수리(`repair_drafts`), 합성(`compose`), 개발 초안(`dev_draft`), 데일리 글(`daily_post`) 추가
+- 개인 경로·모델명·URL을 제거하고 플레이스홀더로 일반화 (`-LMStudioModel` 기본값 `local-model`)
+- Python 패키지 버전만 0.6.0으로 맞춤 (기능 변경 없음)
 
 ### v0.5.4 / DailyLog 1.2 변경점
 

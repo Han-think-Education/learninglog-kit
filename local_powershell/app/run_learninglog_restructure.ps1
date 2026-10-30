@@ -17,14 +17,14 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
-Import-Module (Join-Path $PSScriptRoot "_local_core\LearningLog.LocalCore.psm1") -Force -DisableNameChecking
+Import-Module (Join-Path $PSScriptRoot "core\LearningLog.LocalCore.psm1") -Force -DisableNameChecking
 
 $Root = Get-LLRoot
 $RunDT = Get-Date
 $RunTime = $RunDT.ToString("yyyy-MM-dd HH:mm:ss")
 $TimeStamp = $RunDT.ToString("yyyyMMdd_HHmmss")
 $BackupDir = Get-LLPath ("07_archive\backups\restructure_{0}" -f $TimeStamp)
-$BlogSourceRoot = "C:\Ollama-IPEX\blog-source\content"
+$BlogSourceRoot = Join-Path (Get-LLBlogRoot) "content"
 
 function Get-TargetFiles {
     param(

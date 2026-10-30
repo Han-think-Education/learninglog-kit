@@ -6,7 +6,6 @@ categories: ["learning"]
 tags: []
 description: ""
 # lang: "ko" | "en" | "bilingual"
-lang: "ko"
 ---
 
 <!-- 한국어 포스트 본문 시작 -->
@@ -67,5 +66,5 @@ lang: "ko"
 
 ---
 
-> 🤖 이 글은 로컬 LLM(AI)의 도움을 받아 작성되었습니다.
-> This post was written with the help of a local LLM (AI).
+> 🤖 이 글은 AI와 블로그 주인의 합작으로 작성되었습니다!
+> This post was created collaboratively by AI and the blog owner.

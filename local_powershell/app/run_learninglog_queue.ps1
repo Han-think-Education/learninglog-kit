@@ -18,14 +18,21 @@
       - extracted summary 생성 없음
       - LLM / Ollama 호출 없음
 
+.PARAMETER IncludeBacklog
+    과거에 등록됐지만 아직 처리되지 않은 대기 항목까지 포함한다. 기본값은 오늘 등록분만 표시한다.
+
 .NOTES
     읽는 파일: source_registry.csv
     쓰는 파일: 09_reports\queue_report_YYYYMMDD_HHMMSS.md
 #>
 
+param(
+    [switch]$IncludeBacklog
+)
+
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
-Import-Module (Join-Path $PSScriptRoot "_local_core\LearningLog.LocalCore.psm1") -Force -DisableNameChecking
+Import-Module (Join-Path $PSScriptRoot "core\LearningLog.LocalCore.psm1") -Force -DisableNameChecking
 
 # ─────────────────────────────────────────────────────────
 # 경로 설정
@@ -63,6 +70,7 @@ $ActionMap = @{
 $RunDT     = Get-Date
 $RunTime   = $RunDT.ToString("yyyy-MM-dd HH:mm:ss")
 $TimeStamp = $RunDT.ToString("yyyyMMdd_HHmmss")
+$TodayStr  = $RunDT.ToString("yyyy-MM-dd")
 
 # ─────────────────────────────────────────────────────────
 # 배너
@@ -93,8 +101,18 @@ Write-Host ("  레지스트리 로드: {0} 개 전체" -f $allSources.Count) -Fo
 # ─────────────────────────────────────────────────────────
 # 2. 처리 대기 소스 필터 (registered / new)
 # ─────────────────────────────────────────────────────────
-$queueSources = $allSources | Where-Object { $_.status -in @("registered", "new") }
-Write-Host ("  처리 대기:       {0} 개 (registered/new)" -f $queueSources.Count) -ForegroundColor Yellow
+$pendingSources = @($allSources | Where-Object { $_.status -in @("registered", "new") })
+if ($IncludeBacklog) {
+    $queueSources = $pendingSources
+    $excludedBacklog = 0
+} else {
+    $queueSources = @($pendingSources | Where-Object { (Get-LLProp $_ "date_added") -like "$TodayStr*" })
+    $excludedBacklog = $pendingSources.Count - $queueSources.Count
+}
+Write-Host ("  처리 대기:       {0} 개 ({1})" -f $queueSources.Count, $(if($IncludeBacklog){"전체"}else{"오늘"})) -ForegroundColor Yellow
+if ($excludedBacklog -gt 0) {
+    Write-Host ("  과거 대기 숨김:   {0} 개 (-IncludeBacklog 로 포함)" -f $excludedBacklog) -ForegroundColor DarkGray
+}
 
 # ─────────────────────────────────────────────────────────
 # 3. 우선순위 정렬
@@ -176,6 +194,7 @@ $summaryLines.Add("| 항목 | 수 |")
 $summaryLines.Add("|------|----|")
 $summaryLines.Add("| 전체 등록 소스 | $($allSources.Count) |")
 $summaryLines.Add("| 처리 대기 (registered/new) | $($queueSources.Count) |")
+$summaryLines.Add("| 과거 대기 숨김 | $excludedBacklog |")
 $summaryLines.Add("| 즉시 처리 가능 (processable personal_note) | $(@($queueSources | Where-Object { Test-LLMProcessableSource $_ }).Count) |")
 $summaryLines.Add("| 강의 대기 (lecture) | $(@($queueSources | Where-Object { $_.source_type -eq 'lecture' }).Count) |")
 $summaryLines.Add("| internal-only 전체 | $($internalAll.Count) |")

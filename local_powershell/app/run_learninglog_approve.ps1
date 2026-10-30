@@ -38,7 +38,7 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
-Import-Module (Join-Path $PSScriptRoot "_local_core\LearningLog.LocalCore.psm1") -Force -DisableNameChecking
+Import-Module (Join-Path $PSScriptRoot "core\LearningLog.LocalCore.psm1") -Force -DisableNameChecking
 
 $RunTime   = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
 $TodayStr  = (Get-Date).ToString("yyyy-MM-dd")
@@ -162,11 +162,22 @@ if ($DraftPath -ne "") {
         $rel = $allDrafts[$i].FullName.Replace($DraftsDir + "\", "").Replace("\", "/")
         $c = Read-LLText $allDrafts[$i].FullName
         $row = Resolve-DraftRow $allDrafts[$i] $c
-        $b = Get-LLDraftBadges -Content $c -Row $row
+        $section = ($rel -split "/")[0]
+        $b = Get-LLDraftBadges -Content $c -Row $row -Section $section
+        $readyPath = Join-Path (Join-Path $ReadyDir $section) $allDrafts[$i].Name
+        $snapshot = Get-LLApprovalSnapshotStatus -ReadyRoot $ReadyDir -ApprovedPath $readyPath -SourceId (Get-LLProp $row 'source_id') -Section $section -FileName $allDrafts[$i].Name
+        $reapproval = (
+            $row -and (Get-LLProp $row 'status').ToLowerInvariant() -eq 'approved' -and
+            $snapshot.status -ne 'match' -and $b.qaPass -and
+            (Get-LLProp $row 'public_policy').ToLowerInvariant() -in @('public','partial-public') -and
+            (Test-LLPublishableSource $row) -and -not $b.isByproduct
+        )
         $isPub = Test-LLDraftAlreadyPublished -Draft $allDrafts[$i] -Row $row -PublishedNames $publishedNames
-        $mark = if ($isPub) { "📦" } elseif ($b.canApprove) { "✅" } else { "⛔" }
-        $col  = if ($isPub) { "DarkGray" } elseif ($b.canApprove) { "Green" } else { "DarkGray" }
+        $canApproveItem = $b.canApprove -or $reapproval
+        $mark = if ($isPub) { "📦" } elseif ($reapproval) { "🔁" } elseif ($b.canApprove) { "✅" } else { "⛔" }
+        $col  = if ($isPub) { "DarkGray" } elseif ($canApproveItem) { "Green" } else { "DarkGray" }
         $badgeStr = ($b.badges | ForEach-Object { $_.text }) -join " "
+        if ($reapproval) { $badgeStr += " 재승인 필요" }
         if ($isPub) { $badgeStr = "이미 발행됨 " + $badgeStr }
         Write-Host ("  [{0,2}] {1} {2}" -f ($i + 1), $mark, $rel) -ForegroundColor $col
         Write-Host ("       {0}" -f $badgeStr) -ForegroundColor DarkGray
@@ -207,7 +218,18 @@ foreach ($d in $targets) {
     $rel = $d.FullName.Replace($DraftsDir + "\", "").Replace("\", "/")
     $content = Read-LLText $d.FullName
     $row = Resolve-DraftRow $d $content
-    $b = Get-LLDraftBadges -Content $content -Row $row
+    $isByproduct = Test-LLDraftByproduct -Draft $d -Row $row
+    $section = ($rel -split "/")[0]
+    $b = Get-LLDraftBadges -Content $content -Row $row -ByproductOverride $isByproduct -Section $section
+    $destDir = Join-Path $ReadyDir $section
+    $dest = Join-Path $destDir $d.Name
+    $snapshot = Get-LLApprovalSnapshotStatus -ReadyRoot $ReadyDir -ApprovedPath $dest -SourceId (Get-LLProp $row 'source_id') -Section $section -FileName $d.Name
+    $reapproval = (
+        $row -and (Get-LLProp $row 'status').ToLowerInvariant() -eq 'approved' -and
+        $snapshot.status -ne 'match' -and $b.qaPass -and
+        (Get-LLProp $row 'public_policy').ToLowerInvariant() -in @('public','partial-public') -and
+        (Test-LLPublishableSource $row) -and -not $b.isByproduct
+    )
 
     if (-not $IncludePublished -and (Test-LLDraftAlreadyPublished -Draft $d -Row $row -PublishedNames $publishedNames)) {
         Write-Host ("  [건너뜀] {0}" -f $rel) -ForegroundColor DarkGray
@@ -216,7 +238,7 @@ foreach ($d in $targets) {
         continue
     }
 
-    if (-not $b.canApprove) {
+    if (-not $b.canApprove -and -not $reapproval) {
         $why = ($b.badges | Where-Object { $_.cls -ne "ok" } | ForEach-Object { $_.text }) -join ", "
         Write-Host ("  [차단] {0}" -f $rel) -ForegroundColor Red
         Write-Host ("         사유: {0}" -f $why) -ForegroundColor DarkGray
@@ -226,18 +248,19 @@ foreach ($d in $targets) {
 
     $section = ($rel -split "/")[0]
     if (-not $section) { $section = "learning" }
-    $destDir = Join-Path $ReadyDir $section
     if (-not (Test-Path -LiteralPath $destDir)) { New-Item -ItemType Directory -Path $destDir -Force | Out-Null }
-    $dest = Join-Path $destDir $d.Name
+    if (Test-Path -LiteralPath $dest) {
+        $null = Backup-LLFile -Path $dest -Prefix ('approved_before_reapproval_' + [guid]::NewGuid().ToString('N'))
+    }
     Copy-Item -LiteralPath $d.FullName -Destination $dest -Force
 
     $sid = Get-LLDraftSourceId $content
     if (-not $sid -and $row) { $sid = Get-LLProp $row "source_id" }
     if ($sid) { $null = Set-LLRegistryStatus -SourceId $sid -Status "approved" }
 
-    Add-LLApprovalLogEntry -LogPath $LogPath -FileName $d.Name -SourceId $sid -Section $section -QaStatus "PASS"
+    Add-LLApprovalLogEntry -LogPath $LogPath -FileName $d.Name -SourceId $sid -Section $section -QaStatus "PASS" -Notes $(if ($reapproval) { 'explicit reapproval' } else { '' }) -ApprovedPath $dest -ReadyRoot $ReadyDir
 
-    Write-Host ("  [승인] {0} -> 05_ready_to_publish/{1}/" -f $rel, $section) -ForegroundColor Green
+    Write-Host ("  [{0}] {1} -> 05_ready_to_publish/{2}/" -f $(if ($reapproval) {'재승인'} else {'승인'}), $rel, $section) -ForegroundColor Green
     $approved++
 }
 
